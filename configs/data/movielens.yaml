@@ -1,0 +1,45 @@
+dataset:
+  name: movielens
+  min_user_interactions: 50
+  max_interactions_per_user:
+  implicit_min_rating: 4.0
+
+paths:
+  ratings: data/raw/movielens/ratings.csv
+  movies: data/raw/movielens/movies.csv
+  output_dir: data/processed/movielens/25
+
+split:
+  history_length: 20
+  train_pct: 0.7
+  val_pct: 0.1
+  test_pct: 0.2
+  train_future_pct: 0.2
+
+sampling:
+  list_sizes: [25]
+  min_future_positives: 1
+  deterministic: true
+
+reranking:
+  max_history_items: 20
+
+retrieval:
+  method: lightgcn
+  k_max: 1500
+  embedding_dim: 128
+  num_layers: 3
+  epochs: 100
+  learning_rate: 0.001
+  reg: 0.00001
+  edge_samples_per_epoch: 3000000
+  batch_size: 8192
+  negatives_per_positive: 4
+  filter_seen: true
+  use_cuda: true
+  use_amp: true
+  deterministic: false
+
+training:
+  seed: 42
+  max_users: 5000
