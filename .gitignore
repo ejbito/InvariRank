@@ -11,10 +11,10 @@ __pycache__/
 venv/
 
 .pdf_extract_tmp/
-runs/
-checkpoints/
-fine-tuned/
-data/
+/runs/
+/checkpoints/
+/fine-tuned/
+/data/
 *.pt
 *.pth
 *.safetensors
