@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from typing import Any
 import copy
+from typing import Any
 
-from ..modeling.masks import build_attention_mask
-from ..modeling.positions import build_position_ids
-from ..modeling.spans import SpanExtractor
+from model.invarirank import SpanExtractor, build_attention_mask, build_position_ids
 
 
 class MeanLogProbListwiseScorer:
@@ -13,7 +11,7 @@ class MeanLogProbListwiseScorer:
         import torch.nn as nn
 
         class _Scorer(nn.Module):
-            def __init__(self, outer: "MeanLogProbListwiseScorer"):
+            def __init__(self, outer: MeanLogProbListwiseScorer):
                 super().__init__()
                 self.outer = outer
                 self.backbone = outer.backbone

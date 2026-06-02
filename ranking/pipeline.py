@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..config import require_fields
-from ..data import ListwiseRankingDataset, filter_and_subsample, listwise_collator
-from ..modeling import load_model_for_ranking, load_tokenizer, select_device
-from ..utils import load_jsonl, set_seed, write_json
+from config import require_fields
+from datasets.utils import load_jsonl, set_seed, write_json
+from model import load_model_for_ranking, load_tokenizer, select_device
+from training.dataset import ListwiseRankingDataset, filter_and_subsample, listwise_collator
+
 from .scoring import MeanLogProbListwiseScorer, build_rank_record
 
 
@@ -28,10 +29,7 @@ def run_ranking_pipeline(cfg: Any) -> list[dict[str, Any]]:
         load_jsonl(cfg.data_path),
         getattr(cfg, "ranking_num_samples", None),
     )
-    print(
-        "[Ranking] samples="
-        f"{len(samples)}, permutations={int(getattr(cfg, 'eval_num_permutations', 1))}"
-    )
+    print(f"[Ranking] samples={len(samples)}, permutations={int(getattr(cfg, 'eval_num_permutations', 1))}")
     dataset = ListwiseRankingDataset(samples, cfg, tokenizer, mode="eval")
     loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=listwise_collator)
 
