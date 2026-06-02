@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from scipy.sparse import csr_matrix
 from tqdm.auto import tqdm
 
-from ..preprocessing.config_utils import cfg_get
+from datasets.utils import cfg_get
 
 
 class LightGCNRetriever:
@@ -322,19 +322,17 @@ class LightGCNRetriever:
                 pos = torch.from_numpy(i_np).to(self.device)
                 neg = torch.from_numpy(neg_np).to(self.device)
 
-                u_emb = user_all[u]              # [B, D]
-                pos_emb = item_all[pos]          # [B, D]
-                neg_emb = item_all[neg]          # [B, N, D]
+                u_emb = user_all[u]  # [B, D]
+                pos_emb = item_all[pos]  # [B, D]
+                neg_emb = item_all[neg]  # [B, N, D]
 
-                pos_scores = (u_emb * pos_emb).sum(dim=1, keepdim=True)             # [B, 1]
-                neg_scores = (u_emb.unsqueeze(1) * neg_emb).sum(dim=2)              # [B, N]
+                pos_scores = (u_emb * pos_emb).sum(dim=1, keepdim=True)  # [B, 1]
+                neg_scores = (u_emb.unsqueeze(1) * neg_emb).sum(dim=2)  # [B, N]
 
                 bpr = -F.logsigmoid(pos_scores - neg_scores).mean()
 
                 reg_loss = self.reg * (
-                    u_emb.pow(2).sum(dim=1).mean()
-                    + pos_emb.pow(2).sum(dim=1).mean()
-                    + neg_emb.pow(2).sum(dim=2).mean()
+                    u_emb.pow(2).sum(dim=1).mean() + pos_emb.pow(2).sum(dim=1).mean() + neg_emb.pow(2).sum(dim=2).mean()
                 )
 
                 loss = bpr + reg_loss
@@ -384,12 +382,12 @@ class LightGCNRetriever:
                 item_all=item_all,
                 n_hard=hard_count,
             )
-            out[:, col:col + hard_count] = hard
+            out[:, col : col + hard_count] = hard
             col += hard_count
 
         if rand_count > 0:
             rand = self._sample_random_negatives(users_np, rand_count)
-            out[:, col:col + rand_count] = rand
+            out[:, col : col + rand_count] = rand
 
         return out
 
@@ -452,8 +450,8 @@ class LightGCNRetriever:
         u = torch.from_numpy(users_np).to(self.device)
         cand_t = torch.from_numpy(cand).to(self.device)
 
-        u_emb = user_all[u]                          # [B, D]
-        cand_emb = item_all[cand_t]                 # [B, C, D]
+        u_emb = user_all[u]  # [B, D]
+        cand_emb = item_all[cand_t]  # [B, C, D]
         scores = (u_emb.unsqueeze(1) * cand_emb).sum(dim=2)  # [B, C]
 
         valid_t = torch.from_numpy(valid).to(self.device)
