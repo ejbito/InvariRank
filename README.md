@@ -4,18 +4,18 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 
-Code for paper "[One Pass, Any Order: Position-Invariant Listwise Reranking for LLM-Based Recommendation](https://arxiv.org/abs/2604.27599)"
+Code for the paper ["One Pass, Any Order: Position-Invariant Listwise Reranking for LLM-Based Recommendation"](https://arxiv.org/abs/2604.27599).
 
-InvariRank is a listwise LLM reranking method for recommendation. It is designed to reduce candidate-order sensitivity by using a structured attention mask and shared candidate position IDs, so the model scores candidates more consistently across input permutations.
+InvariRank is a listwise LLM reranking method for recommendation. It reduces candidate-order sensitivity by using a structured attention mask and shared candidate position IDs, so candidates can be scored more consistently across input permutations.
 
 ## News
 
-- **[2026.04.30]** Our paper is now available at https://arxiv.org/abs/2604.27599
-- **[2026.04.02]** Our paper has been accepted to SIGIR 2026 short paper track!
+- **[2026.04.30]** Paper available on arXiv: https://arxiv.org/abs/2604.27599
+- **[2026.04.02]** Paper accepted to the SIGIR 2026 short paper track.
 
-## Quick example
+## Quick Example
 
-Below is a recommendation reranking example. A user has watched several science-fiction movies, and the system needs to rerank the candidate movies:
+A recommendation sample contains a user history and candidate items:
 
 ```python
 sample = {
@@ -33,7 +33,7 @@ sample = {
 }
 ```
 
-A standard listwise LLM reranker can produce different rankings when the candidate order changes:
+A standard listwise LLM reranker can change its output when the input order changes:
 
 ```python
 input_order_a = ["Interstellar", "The Notebook", "Blade Runner 2049"]
@@ -43,60 +43,51 @@ standard_output_a = ["Interstellar", "Blade Runner 2049", "The Notebook"]
 standard_output_b = ["Blade Runner 2049", "Interstellar", "The Notebook"]
 ```
 
-InvariRank aims to make the output stable across these candidate orders:
+InvariRank is designed to make the ranked output stable across candidate orders:
 
 ```python
 invarirank_output_a = ["Interstellar", "Blade Runner 2049", "The Notebook"]
 invarirank_output_b = ["Interstellar", "Blade Runner 2049", "The Notebook"]
 ```
 
-## Python Version
-
-Use **Python 3.10 or newer**. Python 3.12 is recommended.
-
-## Project Structure
+## Repository Structure
 
 ```text
-configs/
-|-- data/
-|   |-- movielens.yaml
-|   `-- amazon_books.yaml
-|-- dev/
-|   `-- smoke.yaml
-|-- eval/
-|   `-- rank.yaml
-`-- train/
-    `-- train.yaml
-
-scripts/
-|-- prepare_dataset.py
-|-- smoke_check.py
-|-- train.py
-|-- rank.py
-`-- evaluate.py
-
-src/invarirank/
-|-- data/
-|-- modeling/
-|-- training/
-|-- ranking/
-`-- evaluation/
-
-docs/
-tests/
+configs/               minimal example configs for data, training, and ranking
+datasets/              raw dataset builders for MovieLens and Amazon Books
+model/                 model loading plus InvariRank mask/position logic
+prompts/               prompt builders and JSON wording templates
+ranking/               ranking pipeline and mean-log-prob scoring
+retriever/             LightGCN retrieval for candidate generation
+scripts/               command-line entry points
+training/              tokenized listwise dataset, losses, metrics, training loop
+config.py              YAML/JSON config loading
 requirements.txt
-README.md
+pyproject.toml
+```
+
+Important files:
+
+```text
+datasets/base.py       shared raw-to-JSONL dataset build flow
+datasets/ml_32m.py     MovieLens 32M support
+datasets/books.py      Amazon Books support
+training/dataset.py    processed JSONL -> prompt permutations -> tokenized batches
+model/base.py          tokenizer/model/LoRA loading
+model/invarirank.py    span extraction, block mask, shared position IDs
+prompts/invarirank.py  InvariRank prompt builder with required markers
+prompts/zeroshot.py    generic RankGPT-style prompt builder without markers
 ```
 
 ## Environment Setup
 
-Create a virtual environment:
+Use Python 3.10 or newer. Python 3.12 is recommended.
+
+Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
 ```
-
-Activate it:
 
 ```powershell
 # Windows PowerShell
@@ -117,86 +108,28 @@ pip install -r requirements.txt
 
 For gated Hugging Face models, authenticate with the Hugging Face CLI or set `HF_TOKEN`.
 
-## Step By Step
 
-### 1. Dataset Preparation
+## Code Quality
 
-The MovieLens config expects raw files at:
+This repository uses Ruff for lightweight linting and formatting:
 
-```text
-data/raw/movielens/ratings.csv
-data/raw/movielens/movies.csv
+```bash
+python -m ruff check .
+python -m ruff format .
 ```
+## Usage
 
-If your files are somewhere else, edit `configs/data/movielens.yaml`.
+The repository includes three minimal example configs in `configs/`. Edit paths, model names, sample counts, and training settings before running larger experiments.
 
-MovieLens:
+### 1. Build Dataset
+
+Build processed train/validation/test JSONL files from MovieLens or Amazon Books:
 
 ```powershell
-python scripts/prepare_dataset.py --config configs/data/movielens.yaml
+python scripts/build_dataset.py --config configs/dataset.yaml
 ```
 
-Amazon Books:
-
-```powershell
-python scripts/prepare_dataset.py --config configs/data/amazon_books.yaml
-```
-
-The dataset scripts write processed JSONL files under the configured `paths.output_dir`, usually:
-
-```text
-data/processed/<dataset>/<list_size>/
-  train.jsonl
-  val.jsonl
-  test.jsonl
-```
-
-If you want to test the code path before training larger models, run the [smoke check](docs/workflows.md#smoke-check).
-
-### 2. Training
-
-```powershell
-python scripts/train.py --config configs/train/train.yaml
-```
-
-The default training config uses:
-
-```yaml
-attention_mask: block
-position_ids: shared
-```
-
-This is the InvariRank setting.
-
-### 3. Ranking
-
-```powershell
-python scripts/rank.py --config configs/eval/rank.yaml
-```
-
-`configs/eval/rank.yaml` follows `configs/train/train.yaml`: same model, same InvariRank settings, and `adapter_path` pointing to the trained checkpoint.
-
-Set the number of samples and permutations directly in `configs/eval/rank.yaml`:
-
-```yaml
-ranking_num_samples: 10
-eval_num_permutations: 10
-```
-
-### 4. Evaluation
-
-```powershell
-python scripts/evaluate.py --input runs/eval/invarirank_movielens/ranked_lists.json --output runs/eval/invarirank_movielens/metrics.json
-```
-
-The evaluator reports:
-
-- effectiveness: `HR@5`, `HR@10`, `nDCG@5`, `nDCG@10`
-- robustness: Kendall, Spearman, top-k agreement
-
-## Main Outputs
-
-Processed datasets:
+The dataset config should define raw file paths, output paths, split settings, sampling settings, and retrieval settings. The script writes:
 
 ```text
 data/processed/<dataset>/<list_size>/
@@ -205,87 +138,147 @@ data/processed/<dataset>/<list_size>/
 `-- test.jsonl
 ```
 
-Training:
+### 2. Train Model
+
+Train the reranker from processed JSONL files:
+
+```powershell
+python scripts/train_model.py --config configs/train.yaml
+```
+
+For InvariRank, use:
+
+```yaml
+attention_mask: block
+position_ids: shared
+prompt_style: invarirank
+```
+
+The training pipeline uses `training/dataset.py` to create candidate permutations, build prompts, tokenize them, and pass them to the model.
+
+### 3. Run Ranking
+
+Run ranking on processed JSONL files:
+
+```powershell
+python scripts/run_ranking.py --config configs/rank.yaml
+```
+
+Ranking writes:
 
 ```text
-runs/train/invarirank_movielens/
+runs/eval/<run_name>/
+`-- ranked_lists.json
+```
+
+### 4. Evaluate Ranking
+
+Evaluate a ranked lists file and compute ranking metrics:
+
+```powershell
+python scripts/evaluate_ranking.py --config configs/rank.yaml
+```
+
+Or point directly at a ranked list JSON file:
+
+```powershell
+python scripts/evaluate_ranking.py --ranked-lists runs/eval/invarirank_movielens/ranked_lists.json
+```
+
+Supported metrics:
+
+- `hr@5`, `hr@10`
+- `ndcg@5`, `ndcg@10`
+- `spearman`
+- `kendall`
+- `topk_overlap@5`, `topk_overlap@10`
+
+## Configs
+
+```text
+configs/dataset.yaml    build MovieLens processed JSONL data
+configs/train.yaml      fine-tune an InvariRank reranker
+configs/rank.yaml       run ranking with a trained adapter
+```
+
+The configs are intentionally small. They are meant to show the expected fields and should be edited for your local dataset paths, model choice, output directories, and experiment size.
+## Prompt Styles
+
+Prompt construction is handled by the `prompts/` package.
+
+InvariRank prompts enforce the structural markers required by the method:
+
+```text
+[SPAN]
+... user history and instruction ...
+[/SPAN]
+
+[ITEM]
+... candidate item ...
+[/ITEM]
+```
+
+The wording is controlled by JSON templates in `prompts/templates/`, but marker insertion is enforced in Python so InvariRank cannot accidentally be run without the required span and item markers.
+
+Available prompt builders:
+
+- `prompt_style: invarirank`: InvariRank prompt with `[SPAN]` and `[ITEM]` markers.
+- `prompt_style: rankgpt` or `prompt_style: zeroshot`: generic listwise prompt without InvariRank markers.
+
+Template files:
+
+```text
+prompts/templates/invarirank.json
+prompts/templates/rankgpt.json
+prompts/templates/simple.json
+```
+
+## Architecture
+
+The current workflow is:
+
+```text
+raw interactions
+  -> datasets/ + retriever/
+  -> train/val/test JSONL
+  -> training/dataset.py creates prompt permutations
+  -> prompts/ builds method-specific prompts
+  -> model/ applies InvariRank mask and position logic
+  -> training/ fine-tunes the model
+  -> ranking/ scores candidate lists with mean log probability
+```
+
+The mean-log-probability scorer lives in `ranking/scoring.py` and is intentionally method-agnostic. Future baselines can reuse the same scorer with different prompt styles or model settings.
+
+## Outputs
+
+Training runs typically write:
+
+```text
+runs/train/<run_name>/
 |-- config.json
 |-- training_log.jsonl
 `-- checkpoints/
 ```
 
-Ranking and evaluation:
+Ranking runs write:
 
 ```text
-runs/eval/invarirank_movielens/
-|-- ranked_lists.json
-`-- metrics.json
+runs/eval/<run_name>/
+`-- ranked_lists.json
 ```
-
-## Configs
-
-Current configs:
-
-```text
-configs/data/movielens.yaml
-configs/data/amazon_books.yaml
-configs/dev/smoke.yaml
-configs/eval/rank.yaml
-configs/train/train.yaml
-```
-
-The main ranking controls are:
-
-```yaml
-ranking_num_samples: 10
-eval_num_permutations: 10
-```
-
-To compare against a standard causal/LFT-style setting, change:
-
-```yaml
-attention_mask: causal
-position_ids: standard
-```
-
-## Architecture
-
-- `data`: builds train/validation/test JSONL files with retrieval candidates.
-- `modeling`: loads models and constructs candidate spans, attention masks, and position IDs.
-- `training`: fine-tunes the reranker with LambdaRank-style supervision.
-- `ranking`: reranks each sample under configured candidate permutations.
-- `evaluation`: reports effectiveness and robustness metrics.
-
-The workflow is:
-
-```text
-raw interactions
-  -> dataset preparation + retrieval candidates
-  -> train/val/test JSONL
-  -> InvariRank training
-  -> multi-permutation ranking
-  -> effectiveness and robustness evaluation
-```
-
-## Documentation
-
-- [Config Reference](docs/configs.md)
-- [Data Format](docs/data_format.md)
-- [Ranked-List Schema](docs/ranked_lists_schema.md)
-- [Metrics](docs/metrics.md)
-- [Workflows](docs/workflows.md)
 
 ## Cite
 
 ```latex
 @misc{bito2026passorderpositioninvariantlistwise,
-      title={One Pass, Any Order: Position-Invariant Listwise Reranking for LLM-Based Recommendation}, 
+      title={One Pass, Any Order: Position-Invariant Listwise Reranking for LLM-Based Recommendation},
       author={Ethan Bito and Yongli Ren and Estrid He},
       year={2026},
       eprint={2604.27599},
       archivePrefix={arXiv},
       primaryClass={cs.IR},
-      url={https://arxiv.org/abs/2604.27599}, 
+      url={https://arxiv.org/abs/2604.27599},
 }
 ```
 

@@ -6,7 +6,27 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from .utils import dict_to_namespace, ensure_dir, namespace_to_dict
+
+def ensure_dir(path: str | Path) -> Path:
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def dict_to_namespace(value: Any) -> Any:
+    if isinstance(value, dict):
+        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return [dict_to_namespace(v) for v in value]
+    return value
+
+
+def namespace_to_dict(value: Any) -> Any:
+    if isinstance(value, SimpleNamespace):
+        return {k: namespace_to_dict(v) for k, v in vars(value).items()}
+    if isinstance(value, list):
+        return [namespace_to_dict(v) for v in value]
+    return value
 
 
 DEFAULTS: dict[str, Any] = {
@@ -57,7 +77,7 @@ def _load_raw_config(path: Path) -> dict[str, Any]:
 
 
 def _load_simple_yaml(text: str) -> dict[str, Any]:
-    """Parse the flat YAML subset used by the repository's default configs."""
+    """Parse a simple flat YAML subset when PyYAML is unavailable."""
     data: dict[str, Any] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
