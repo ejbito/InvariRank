@@ -3,7 +3,7 @@ trust_remote_code: false
 device: cuda
 dtype: bfloat16
 
-data_path: ../data/processed/invarirank_movielens/25/test.jsonl
+data_path: ../data/processed/movielens/25/test.jsonl
 output_dir: ../runs/eval/invarirank_movielens
 ranked_lists_path: ../runs/eval/invarirank_movielens/ranked_lists.json
 adapter_path: ../runs/train/invarirank_movielens/checkpoints/final

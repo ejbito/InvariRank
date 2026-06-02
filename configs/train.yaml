@@ -3,9 +3,9 @@ trust_remote_code: false
 device: cuda
 dtype: bfloat16
 
-train_path: ../data/processed/<dataset>/<length>/train.jsonl
-val_path: ../data/processed/<dataset>/<length>/val.jsonl
-run_dir: ../runs/train/invarirank_<dataset>
+data_path: ../data/processed/movielens/25/train.jsonl
+val_path: ../data/processed/movielens/25/val.jsonl
+run_dir: ../runs/train/invarirank_movielens
 
 max_seq_length: 4096
 train_max_samples: 1000
