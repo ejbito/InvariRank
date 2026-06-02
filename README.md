@@ -117,6 +117,7 @@ This repository uses Ruff for lightweight linting and formatting:
 python -m ruff check .
 python -m ruff format .
 ```
+
 ## Usage
 
 The repository includes three minimal example configs in `configs/`. Edit paths, model names, sample counts, and training settings before running larger experiments.
@@ -185,13 +186,11 @@ Or point directly at a ranked list JSON file:
 python scripts/evaluate_ranking.py --ranked-lists runs/eval/invarirank_movielens/ranked_lists.json
 ```
 
-Supported metrics:
+The output separates effectiveness and robustness:
 
-- `hr@5`, `hr@10`
-- `ndcg@5`, `ndcg@10`
-- `spearman`
-- `kendall`
-- `topk_overlap@5`, `topk_overlap@10`
+- `effectiveness.hr@k`, `effectiveness.ndcg@k`
+- `robustness.permutation_spearman`, `robustness.permutation_kendall`
+- `robustness.permutation_topk_overlap@k`
 
 ## Configs
 
@@ -202,6 +201,7 @@ configs/rank.yaml       run ranking with a trained adapter
 ```
 
 The configs are intentionally small. They are meant to show the expected fields and should be edited for your local dataset paths, model choice, output directories, and experiment size.
+
 ## Prompt Styles
 
 Prompt construction is handled by the `prompts/` package.

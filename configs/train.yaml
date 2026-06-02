@@ -3,7 +3,7 @@ trust_remote_code: false
 device: cuda
 dtype: bfloat16
 
-data_path: ../data/processed/movielens/25/train.jsonl
+train_path: ../data/processed/movielens/25/train.jsonl
 val_path: ../data/processed/movielens/25/val.jsonl
 run_dir: ../runs/train/invarirank_movielens
 

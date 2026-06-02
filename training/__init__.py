@@ -2,9 +2,9 @@ from .dataset import ListwiseRankingDataset, RankingSample, filter_and_subsample
 from .losses import lambda_rank_loss, permutation_invariance_loss
 from .metrics import (
     hr_at_k,
+    kendall_tau_from_rank_maps,
     ndcg_at_k,
     spearman_rho_from_rank_maps,
-    kendall_tau_from_rank_maps,
     topk_overlap_at_k,
 )
 
