@@ -5,17 +5,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
-from invarirank.config import load_config
-from invarirank.data.preprocessing import build_dataset_splits
-from invarirank.data.preprocessing.build import write_dataset_splits
-from invarirank.data.preprocessing.config_utils import cfg_get
+from config import load_config
+from datasets import build_dataset_splits, write_dataset_splits
+from datasets.utils import cfg_get
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build InvariRank train/val/test JSONL datasets.")
-    parser.add_argument("--config", required=True, help="Dataset YAML/JSON config.")
+    parser = argparse.ArgumentParser(description="Build train/val/test JSONL datasets.")
+    parser.add_argument("--config", required=True, help="Path to a YAML or JSON dataset config.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -28,4 +27,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -5,10 +5,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
-from invarirank.config import load_config
-from invarirank.training import run_training_pipeline
+from config import load_config
+from training import run_training_pipeline
 
 
 def main() -> None:
