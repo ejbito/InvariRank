@@ -4,10 +4,14 @@ dataset:
   max_interactions_per_user:
   implicit_min_rating: 4.0
 
+# paths:
+#   ratings: ../data/raw/movielens/ratings.csv
+#   movies: ../data/raw/movielens/movies.csv
+#   output_dir: ../data/processed/movielens/25
 paths:
-  ratings: data/raw/movielens/ratings.csv
-  movies: data/raw/movielens/movies.csv
-  output_dir: data/processed/movielens/25
+  ratings: D:\Program Files (x86)\datasets\ml-32m/ratings.csv
+  movies: D:\Program Files (x86)\datasets\ml-32m/movies.csv
+  output_dir: ../data/processed/movielens/25
 
 split:
   history_length: 20
@@ -42,4 +46,4 @@ retrieval:
 
 training:
   seed: 42
-  max_users: 5000
+  max_users: 1000

@@ -1,0 +1,45 @@
+model_name: meta-llama/Llama-3.2-3B-Instruct
+trust_remote_code: false
+device: cuda
+dtype: bfloat16
+
+train_path: ../data/processed/<dataset>/<length>/train.jsonl
+val_path: ../data/processed/<dataset>/<length>/val.jsonl
+run_dir: ../runs/train/invarirank_<dataset>
+
+max_seq_length: 4096
+train_max_samples: 1000
+val_max_samples: 10
+train_num_permutations: 1
+eval_num_permutations: 10
+val_perms_deterministic: true
+
+prompt_style: invarirank
+prompt_template: invarirank
+span_start_token: "[SPAN]"
+span_end_token: "[/SPAN]"
+item_start_token: "[ITEM]"
+item_end_token: "[/ITEM]"
+attention_mask: block
+position_ids: shared
+span_causal: true
+
+gradient_accumulation_steps: 16
+learning_rate: 0.00005
+weight_decay: 0.0
+warmup_steps: 10
+max_grad_norm: 1.0
+num_epochs: 1
+total_optimizer_steps: 100
+save_every_steps: 50
+
+lambda_rank: 1.0
+lambda_perm: 0.0
+permutation_loss: kl
+
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+seed: 42
