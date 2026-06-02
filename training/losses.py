@@ -38,11 +38,13 @@ def lambda_rank_loss(scores: Any, relevance: Any, sigma: float = 1.0, eps: float
     return (delta_ndcg * pair_loss * preference_mask.float()).sum() / (preference_mask.sum().float() + eps)
 
 
-def permutation_invariance_loss(scores_list: list[Any], perms: list[list[int]], mode: str = "kl", temperature: float = 1.0):
+def permutation_invariance_loss(
+    scores_list: list[Any], perms: list[list[int]], mode: str = "kl", temperature: float = 1.0
+):
     import torch
     import torch.nn.functional as F
 
-    from ..ranking.scoring import align_scores_to_shared_candidates
+    from ranking.scoring import align_scores_to_shared_candidates
 
     aligned, _ = align_scores_to_shared_candidates(scores_list, perms)
     if aligned is None or len(aligned) < 2:

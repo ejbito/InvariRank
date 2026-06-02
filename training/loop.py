@@ -4,16 +4,19 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..config import dump_config, require_fields
-from ..data import ListwiseRankingDataset, filter_and_subsample, listwise_collator
-from ..evaluation import hr_at_k, ndcg_at_k
-from ..modeling import build_lora_model, load_tokenizer, select_device
-from ..ranking import MeanLogProbListwiseScorer, align_scores_to_shared_candidates
-from ..utils import ensure_dir, load_jsonl, set_seed
+from config import dump_config, require_fields
+from datasets.utils import ensure_dir, load_jsonl, set_seed
+from model import build_lora_model, load_tokenizer, select_device
+from ranking import MeanLogProbListwiseScorer, align_scores_to_shared_candidates
+
+from .dataset import ListwiseRankingDataset, filter_and_subsample, listwise_collator
 from .losses import lambda_rank_loss, permutation_invariance_loss
+from .metrics import hr_at_k, ndcg_at_k
 
 
-def train_step(batch: dict[str, Any], scorer: Any, optimizer: Any, scaler: Any, cfg: Any, micro_step: int) -> dict[str, Any]:
+def train_step(
+    batch: dict[str, Any], scorer: Any, optimizer: Any, scaler: Any, cfg: Any, micro_step: int
+) -> dict[str, Any]:
     import torch
 
     scorer.train()
@@ -93,14 +96,20 @@ def evaluate(loader: Any, scorer: Any, cfg: Any) -> dict[str, float]:
 
             aligned, _ = align_scores_to_shared_candidates(scores_list, batch["permutations"])
             if aligned is not None and len(aligned) > 1:
-                from ..evaluation import spearman_rho_from_rank_maps
+                from .metrics import spearman_rho_from_rank_maps
 
-                base_order = {i: rank for rank, i in enumerate(aligned[0].detach().cpu().argsort(descending=True).tolist())}
+                base_order = {
+                    i: rank for rank, i in enumerate(aligned[0].detach().cpu().argsort(descending=True).tolist())
+                }
                 for other in aligned[1:]:
-                    other_order = {i: rank for rank, i in enumerate(other.detach().cpu().argsort(descending=True).tolist())}
+                    other_order = {
+                        i: rank for rank, i in enumerate(other.detach().cpu().argsort(descending=True).tolist())
+                    }
                     spears.append(spearman_rho_from_rank_maps(base_order, other_order))
 
-    mean = lambda xs: float(sum(xs) / max(len(xs), 1))
+    def mean(xs):
+        return float(sum(xs) / max(len(xs), 1))
+
     return {
         "hr@5": mean(hr5),
         "hr@10": mean(hr10),
@@ -110,7 +119,9 @@ def evaluate(loader: Any, scorer: Any, cfg: Any) -> dict[str, float]:
     }
 
 
-def save_checkpoint(scorer: Any, optimizer: Any, cfg: Any, tag: str, epoch: int, global_step: int, metrics: dict[str, float]) -> None:
+def save_checkpoint(
+    scorer: Any, optimizer: Any, cfg: Any, tag: str, epoch: int, global_step: int, metrics: dict[str, float]
+) -> None:
     import torch
 
     path = Path(cfg.checkpoint_dir) / tag
@@ -144,7 +155,9 @@ def run_training_pipeline(cfg: Any) -> dict[str, Any]:
     train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=listwise_collator)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=listwise_collator)
 
-    optimizer = AdamW([p for p in scorer.parameters() if p.requires_grad], lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+    optimizer = AdamW(
+        [p for p in scorer.parameters() if p.requires_grad], lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+    )
     scaler = torch.amp.GradScaler("cuda") if cfg.dtype == "float16" and device.type == "cuda" else None
 
     dump_config(cfg, Path(cfg.run_dir) / "config.json")
