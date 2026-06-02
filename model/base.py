@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
-
-from ..utils import get_env_token
 
 
 def resolve_dtype(dtype_name: str):
@@ -35,7 +35,7 @@ def load_tokenizer(cfg: Any):
 
     tokenizer = AutoTokenizer.from_pretrained(
         cfg.model_name,
-        token=get_env_token(),
+        token=os.environ.get("HF_TOKEN"),
         trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),
     )
     special_tokens = [
@@ -81,8 +81,8 @@ def load_base_model(cfg: Any, tokenizer: Any, device: Any):
     dtype = resolve_dtype(getattr(cfg, "dtype", "bfloat16"))
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
-        torch_dtype=dtype,
-        token=get_env_token(),
+        dtype=dtype,
+        token=os.environ.get("HF_TOKEN"),
         trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),
     )
     model.resize_token_embeddings(len(tokenizer))
@@ -111,9 +111,15 @@ def load_model_for_ranking(cfg: Any, tokenizer: Any, device: Any):
     model = load_base_model(cfg, tokenizer, device)
     adapter_path = getattr(cfg, "adapter_path", None) or getattr(cfg, "checkpoint_path", None)
     if adapter_path:
+        adapter_path = Path(adapter_path)
+        if adapter_path.exists() and adapter_path.is_dir() and not (adapter_path / "adapter_config.json").exists():
+            raise ValueError(
+                f"Configured adapter_path exists but is not a PEFT adapter directory: {adapter_path}. "
+                "Remove or unset adapter_path to use the original base model for zero-shot ranking."
+            )
         from peft import PeftModel
 
-        model = PeftModel.from_pretrained(model, adapter_path)
+        model = PeftModel.from_pretrained(model, str(adapter_path))
     model.eval()
     return model
 

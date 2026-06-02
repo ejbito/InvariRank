@@ -1,5 +1,4 @@
-from .masks import AttentionMaskMode, build_attention_mask, make_span_item_block_mask
-from .model import (
+from .base import (
     build_lora_model,
     load_base_model,
     load_model_for_ranking,
@@ -9,8 +8,17 @@ from .model import (
     select_device,
     validate_special_tokens,
 )
-from .positions import PositionIdMode, build_position_ids, make_shared_position_ids
-from .spans import SpanExtractor, SpanInfo
+from .invarirank import (
+    AttentionMaskMode,
+    PositionIdMode,
+    SpanExtractor,
+    SpanInfo,
+    build_attention_mask,
+    build_position_ids,
+    make_shared_position_ids,
+    make_span_item_block_mask,
+    validate_candidate_count,
+)
 
 __all__ = [
     "AttentionMaskMode",
@@ -28,5 +36,6 @@ __all__ = [
     "model_dtype",
     "resolve_dtype",
     "select_device",
+    "validate_candidate_count",
     "validate_special_tokens",
 ]
