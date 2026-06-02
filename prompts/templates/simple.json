@@ -1,0 +1,10 @@
+{
+  "name": "simple",
+  "description": "Compact wording for prompt experiments. Use with prompt_style-specific builders.",
+  "instruction": "Rank these candidate items for the user.",
+  "history_header": "History:",
+  "candidates_header": "Candidates:",
+  "history_item_format": "{title}{year_text}",
+  "candidate_item_format": "{title}{year_text}",
+  "response_instruction": "Return the ranking."
+}
