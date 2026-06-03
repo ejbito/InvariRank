@@ -3,12 +3,12 @@ trust_remote_code: false
 device: cuda
 dtype: bfloat16
 
-train_path: ../data/processed/movielens/25/train.jsonl
-val_path: ../data/processed/movielens/25/val.jsonl
-run_dir: ../runs/train/invarirank_movielens
+train_path: data/processed/movielens/25/train.jsonl
+val_path: data/processed/movielens/25/val.jsonl
+run_dir: runs/train/invarirank_movielens
 
 max_seq_length: 4096
-train_max_samples: 1000
+train_max_samples:
 val_max_samples: 10
 train_num_permutations: 1
 eval_num_permutations: 10
@@ -29,9 +29,9 @@ learning_rate: 0.00005
 weight_decay: 0.0
 warmup_steps: 10
 max_grad_norm: 1.0
-num_epochs: 1
-total_optimizer_steps: 100
-save_every_steps: 50
+num_epochs:
+total_optimizer_steps: 500
+save_every_steps:
 
 lambda_rank: 1.0
 lambda_perm: 0.0
