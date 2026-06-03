@@ -186,11 +186,12 @@ Or point directly at a ranked list JSON file:
 python scripts/evaluate_ranking.py --ranked-lists runs/eval/invarirank_movielens/ranked_lists.json
 ```
 
-The output separates effectiveness and robustness:
+The output separates effectiveness, robustness, and ranking validity:
 
 - `effectiveness.hr@k`, `effectiveness.ndcg@k`
 - `robustness.permutation_spearman`, `robustness.permutation_kendall`
 - `robustness.permutation_topk_overlap@k`
+- `validity.PPI`, `validity.GPI`, `validity.PCR`, `validity.LRI`
 
 ## Configs
 
