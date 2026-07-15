@@ -1,0 +1,171 @@
+project_root: .
+experiment: sigir_2026
+
+reproduction:
+  output_dir: runs/paper/sigir_2026
+  data_dir: data/processed/paper
+  stages: [candidates, train, rank, evaluate]
+  datasets:
+    movielens:
+      name: movielens
+      data:
+        paths:
+          ratings: data/raw/movielens/ratings.csv
+          movies: data/raw/movielens/movies.csv
+    amazon_books:
+      name: amazon_books
+      data:
+        paths:
+          reviews: data/raw/amazon_books/reviews.jsonl
+          meta: data/raw/amazon_books/meta.jsonl
+          cache_dir: data/cache/amazon_books
+        dataset:
+          amazon:
+            use_cache: true
+            cache_chunk_size: 200000
+  models:
+    llama_3b:
+      model_name: meta-llama/Llama-3.2-3B-Instruct
+    mistral_7b:
+      model_name: mistralai/Mistral-7B-Instruct-v0.3
+  methods:
+    - zero_shot
+    - bootstrapping
+    - sgs
+    - stella
+    - lft
+    - invarirank
+  list_sizes: [25]
+  seeds: [42]
+
+methods:
+  zero_shot:
+    backend: generate
+    output_dir: runs/eval/zero_shot_movielens
+  bootstrapping:
+    backend: generate
+    num_samples: 3
+    seed: 42
+    output_dir: runs/eval/bootstrapping_movielens
+  sgs:
+    backend: generate
+    selection_size: 1
+    output_dir: runs/eval/sgs_movielens
+  stella:
+    backend: generate
+    top_one_generation: true
+    batch_size: 8
+    probe_path: data/processed/movielens/25/val.jsonl
+    probe_samples: 100
+    ensemble_steps: 5
+    smoothing: 1.0
+    max_updates: 10
+    aggregate_count: 3
+    transition_matrix_output: runs/eval/stella_movielens/transition_matrix.json
+    output_dir: runs/eval/stella_movielens
+    seed: 42
+  lft:
+    backend: span_logprob
+    run_dir: runs/train/lft_movielens
+    adapter_path: runs/train/lft_movielens/checkpoints/final
+    output_dir: runs/eval/lft_movielens
+  invarirank:
+    backend: span_logprob
+    run_dir: runs/train/invarirank_movielens
+    adapter_path: runs/train/invarirank_movielens/checkpoints/final
+    output_dir: runs/eval/invarirank_movielens
+data:
+  dataset:
+    name: movielens
+    min_user_interactions: 50
+    max_interactions_per_user:
+    implicit_min_rating: 4.0
+  paths:
+    ratings: data/raw/movielens/ratings.csv
+    movies: data/raw/movielens/movies.csv
+    output_dir: data/processed/movielens/25
+  split:
+    history_length: 20
+    train_pct: 0.7
+    val_pct: 0.1
+    test_pct: 0.2
+    train_future_pct: 0.2
+  sampling:
+    list_sizes: [25]
+    min_future_positives: 1
+    deterministic: true
+  reranking:
+    max_history_items: 20
+  retrieval:
+    method: lightgcn
+    k_max: 1500
+    embedding_dim: 128
+    num_layers: 3
+    epochs: 100
+    learning_rate: 0.001
+    reg: 0.00001
+    edge_samples_per_epoch: 3000000
+    batch_size: 8192
+    negatives_per_positive: 4
+    filter_seen: true
+    use_cuda: true
+    use_amp: true
+    deterministic: false
+  training:
+    seed: 42
+    max_users: 5000
+
+training:
+  model_name: meta-llama/Llama-3.2-3B-Instruct
+  device: cuda
+  dtype: bfloat16
+  train_path: data/processed/movielens/25/train.jsonl
+  val_path: data/processed/movielens/25/val.jsonl
+  run_dir: runs/train/invarirank_movielens
+  max_seq_length: 4096
+  train_num_permutations: 1
+  eval_num_permutations: 10
+  val_perms_deterministic: true
+  prompt_template: invarirank
+  attention_mask: block
+  position_ids: shared
+  span_causal: true
+  gradient_accumulation_steps: 16
+  learning_rate: 0.00005
+  total_optimizer_steps: 500
+  lambda_rank: 1.0
+  lambda_perm: 0.0
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+  seed: 42
+
+ranking:
+  model_name: meta-llama/Llama-3.2-3B-Instruct
+  device: cuda
+  dtype: bfloat16
+  data_path: data/processed/movielens/25/test.jsonl
+  output_dir: runs/eval/invarirank_movielens
+  ranked_lists_path: runs/eval/invarirank_movielens/ranked_lists.json
+  adapter_path: runs/train/invarirank_movielens/checkpoints/final
+  ranking_num_samples: 500
+  eval_num_permutations: 10
+  max_seq_length: 4096
+  prompt_template: invarirank
+  attention_mask: block
+  position_ids: shared
+  span_causal: true
+
+generation:
+  do_sample: false
+  num_beams: 1
+  max_new_tokens:
+  incomplete_output: append_input_order
+  allow_fenced_json: true
+  use_chat_template: true
+
+evaluation:
+  ranked_lists_path: runs/eval/invarirank_movielens/ranked_lists.json
+  metrics_path: runs/eval/invarirank_movielens/metrics.json
+  top_k: [5, 10]

@@ -1,0 +1,36 @@
+project_root: .
+
+methods:
+  lft:
+    backend: span_logprob
+    run_dir: runs/train/lft_movielens
+    adapter_path: runs/train/lft_movielens/checkpoints/final
+  invarirank:
+    backend: span_logprob
+    run_dir: runs/train/invarirank_movielens
+    adapter_path: runs/train/invarirank_movielens/checkpoints/final
+training:
+  model_name: meta-llama/Llama-3.2-3B-Instruct
+  device: cuda
+  dtype: bfloat16
+  train_path: data/processed/movielens/25/train.jsonl
+  val_path: data/processed/movielens/25/val.jsonl
+  run_dir: runs/train/invarirank_movielens
+  max_seq_length: 4096
+  train_num_permutations: 1
+  eval_num_permutations: 10
+  val_perms_deterministic: true
+  prompt_template: invarirank
+  attention_mask: block
+  position_ids: shared
+  span_causal: true
+  gradient_accumulation_steps: 16
+  learning_rate: 0.00005
+  total_optimizer_steps: 500
+  lambda_rank: 1.0
+  lambda_perm: 0.0
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+  seed: 42

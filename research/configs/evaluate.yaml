@@ -1,0 +1,6 @@
+project_root: .
+
+evaluation:
+  ranked_lists_path: runs/eval/invarirank_movielens/ranked_lists.json
+  metrics_path: runs/eval/invarirank_movielens/metrics.json
+  top_k: [5, 10]

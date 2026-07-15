@@ -1,0 +1,63 @@
+project_root: .
+
+data:
+  dataset:
+    name: movielens
+
+methods:
+  zero_shot:
+    backend: generate
+    output_dir: runs/eval/zero_shot_movielens
+  bootstrapping:
+    backend: generate
+    num_samples: 3
+    seed: 42
+    output_dir: runs/eval/bootstrapping_movielens
+  sgs:
+    backend: generate
+    selection_size: 1
+    output_dir: runs/eval/sgs_movielens
+  stella:
+    backend: generate
+    top_one_generation: true
+    batch_size: 8
+    probe_path: data/processed/movielens/25/val.jsonl
+    probe_samples: 100
+    ensemble_steps: 5
+    smoothing: 1.0
+    max_updates: 10
+    aggregate_count: 3
+    transition_matrix_output: runs/eval/stella_movielens/transition_matrix.json
+    output_dir: runs/eval/stella_movielens
+    seed: 42
+  lft:
+    backend: span_logprob
+    adapter_path: runs/train/lft_movielens/checkpoints/final
+    output_dir: runs/eval/lft_movielens
+  invarirank:
+    backend: span_logprob
+    adapter_path: runs/train/invarirank_movielens/checkpoints/final
+    output_dir: runs/eval/invarirank_movielens
+ranking:
+  model_name: meta-llama/Llama-3.2-3B-Instruct
+  device: cuda
+  dtype: bfloat16
+  data_path: data/processed/movielens/25/test.jsonl
+  output_dir: runs/eval/invarirank_movielens
+  ranked_lists_path: runs/eval/invarirank_movielens/ranked_lists.json
+  adapter_path: runs/train/invarirank_movielens/checkpoints/final
+  ranking_num_samples: 500
+  eval_num_permutations: 10
+  max_seq_length: 4096
+  prompt_template: invarirank
+  attention_mask: block
+  position_ids: shared
+  span_causal: true
+
+generation:
+  do_sample: false
+  num_beams: 1
+  max_new_tokens:
+  incomplete_output: append_input_order
+  allow_fenced_json: true
+  use_chat_template: true

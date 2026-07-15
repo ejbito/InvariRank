@@ -1,9 +1,0 @@
-{
-  "name": "invarirank",
-  "description": "Default InvariRank prompt wording. Marker insertion is enforced by prompts/invarirank.py.",
-  "instruction": "Given the user's interaction history, rank the candidate items according to the user's preferences.",
-  "history_header": "User history:",
-  "history_item_format": "title: {title}{year_text}{rating_text}{genres_text}",
-  "candidate_item_format": "{title}{year_text}{genres_text}",
-  "candidate_separator": ""
-}
