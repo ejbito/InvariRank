@@ -96,7 +96,43 @@ training_config = TrainingConfig.from_json("configs/training.json")
 
 Use `to_dict()` when a configuration mapping is needed directly. Unknown configuration fields retained in `extras`
 are flattened back into the serialized mapping. Loading JSON reruns normal configuration validation. These files store
-configuration only; saving and reloading complete model directories is implemented separately.
+configuration only.
+
+## Saved Model Lifecycle
+
+Save a configured reranker, then reload it without reconstructing marker, attention, position-ID, tokenizer, or
+adapter settings:
+
+```python
+reranker.save_pretrained("saved/invarirank")
+
+reranker = InvariRankReranker.from_pretrained(
+    "saved/invarirank",
+    config={"device": "cuda"},
+)
+```
+
+The optional configuration mapping applies partial runtime overrides to the saved configuration. Supplying
+`adapter_path` separately is rejected because the saved directory already owns its artifact.
+
+Every saved directory contains:
+
+```text
+saved/invarirank/
+├── invarirank_config.json
+├── framework_metadata.json
+├── tokenizer_config.json
+├── tokenizer files
+└── model or adapter files
+```
+
+For a PEFT-backed reranker, `save_pretrained` stores adapter files and records the required base-model name. Reloading
+that artifact still requires the recorded base model to be locally available or downloadable. For a non-PEFT
+backbone, the directory stores the complete model through its Hugging Face `save_pretrained` implementation.
+
+`framework_metadata.json` records the format version, package version, artifact type, and base-model identity. Loading
+fails early for missing tokenizer/configuration files, unsupported format versions or artifact types, invalid
+framework metadata, missing adapter provenance, and base-model mismatches.
 
 ## PermutationSuite
 

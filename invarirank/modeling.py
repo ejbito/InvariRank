@@ -36,8 +36,9 @@ def select_device(requested: str):
 def load_tokenizer(cfg: Any):
     from transformers import AutoTokenizer
 
+    tokenizer_name = getattr(cfg, "tokenizer_name", None) or cfg.model_name
     tokenizer = AutoTokenizer.from_pretrained(
-        cfg.model_name,
+        tokenizer_name,
         token=os.environ.get("HF_TOKEN"),
         trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),
     )
@@ -82,8 +83,9 @@ def load_base_model(cfg: Any, tokenizer: Any, device: Any):
     from transformers import AutoModelForCausalLM
 
     dtype = resolve_dtype(getattr(cfg, "dtype", "bfloat16"))
+    model_name = getattr(cfg, "base_model_name", None) or cfg.model_name
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_name,
+        model_name,
         dtype=dtype,
         token=os.environ.get("HF_TOKEN"),
         trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),

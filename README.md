@@ -242,6 +242,13 @@ Use one optional permutation per sample when controlled input orders are already
 results = reranker.rank_many(samples, permutations=permutations, batch_size=8)
 ```
 
+Save and reload the configured reranker as one InvariRank directory:
+
+```python
+reranker.save_pretrained("saved/invarirank")
+reranker = InvariRankReranker.from_pretrained("saved/invarirank")
+```
+
 ### Permutation Experiments
 
 `PermutationSuite` runs domain-neutral controlled input-order experiments with InvariRank or another reranker:

@@ -4,11 +4,15 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 FINE_TUNED_METHODS = frozenset({"lft", "invarirank"})
+INVARIRANK_CONFIG_NAME = "invarirank_config.json"
+FRAMEWORK_METADATA_NAME = "framework_metadata.json"
+SAVED_FORMAT_VERSION = 1
 
 
 @dataclass
@@ -246,16 +250,22 @@ class InvariRankReranker(Reranker):
     @classmethod
     def from_pretrained(
         cls,
-        model_name: str,
+        model_name: str | Path,
         *,
         config: RerankerConfig | Mapping[str, Any] | None = None,
         adapter_path: str | None = None,
     ) -> InvariRankReranker:
         from .modeling import load_model_for_ranking, load_tokenizer, select_device
 
+        model_path = Path(model_name)
+        if model_path.is_dir() and _looks_like_saved_directory(model_path):
+            if adapter_path is not None:
+                raise ValueError("adapter_path must not be supplied when loading a saved InvariRank directory.")
+            return cls._from_saved_directory(model_path, config=config)
+
         framework_config = _coerce_config(config)
         cfg = framework_config.to_namespace(
-            model_name=model_name,
+            model_name=str(model_name),
             adapter_path=adapter_path if adapter_path is not None else framework_config.adapter_path,
         )
         device = select_device(cfg.device)
@@ -264,6 +274,79 @@ class InvariRankReranker(Reranker):
         backbone = load_model_for_ranking(cfg, tokenizer, device)
         resolved_config = RerankerConfig.from_mapping(vars(cfg))
         return cls(backbone, tokenizer, resolved_config, device=device)
+
+    @classmethod
+    def _from_saved_directory(
+        cls,
+        path: Path,
+        *,
+        config: RerankerConfig | Mapping[str, Any] | None,
+    ) -> InvariRankReranker:
+        from .modeling import load_model_for_ranking, load_tokenizer, select_device
+
+        saved_config, metadata = _validate_saved_directory(path)
+        framework_config = _merge_saved_config(saved_config, config)
+        artifact_type = metadata["artifact_type"]
+        base_model_name = metadata.get("base_model_name")
+        runtime_model_name = str(base_model_name) if artifact_type == "adapter" else str(path)
+        cfg = framework_config.to_namespace(
+            model_name=runtime_model_name,
+            base_model_name=runtime_model_name,
+            tokenizer_name=str(path),
+            adapter_path=str(path) if artifact_type == "adapter" else None,
+            checkpoint_path=None,
+        )
+        device = select_device(cfg.device)
+        cfg.device = str(device)
+        tokenizer = load_tokenizer(cfg)
+        backbone = load_model_for_ranking(cfg, tokenizer, device)
+        resolved_values = framework_config.to_dict()
+        resolved_values.update({"adapter_path": None, "device": str(device)})
+        if resolved_values.get("model_name") is None:
+            resolved_values["model_name"] = saved_config.model_name
+        resolved_config = RerankerConfig.from_mapping(resolved_values)
+        return cls(backbone, tokenizer, resolved_config, device=device)
+
+    def save_pretrained(self, path: str | Path) -> None:
+        """Save model or adapter weights, tokenizer, configuration, and format metadata."""
+        output = Path(path)
+        if output.exists() and not output.is_dir():
+            raise ValueError(f"Saved InvariRank path exists and is not a directory: {output}")
+        backbone_save = getattr(self.backbone, "save_pretrained", None)
+        tokenizer_save = getattr(self.tokenizer, "save_pretrained", None)
+        if not callable(backbone_save):
+            raise TypeError("The reranker backbone does not implement save_pretrained().")
+        if not callable(tokenizer_save):
+            raise TypeError("The reranker tokenizer does not implement save_pretrained().")
+
+        artifact_type = "adapter" if _is_adapter_backbone(self.backbone) else "model"
+        base_model_name = _adapter_base_model_name(self.backbone) or self.config.model_name
+        if artifact_type == "adapter" and not base_model_name:
+            raise ValueError("Cannot save an adapter without its base model name in the model or RerankerConfig.")
+
+        output.mkdir(parents=True, exist_ok=True)
+        backbone_save(output)
+        tokenizer_save(output)
+
+        config_values = self.config.to_dict()
+        for runtime_key in ("base_model_name", "checkpoint_path", "tokenizer_name"):
+            config_values.pop(runtime_key, None)
+        config_values["adapter_path"] = None
+        if artifact_type == "adapter":
+            config_values["model_name"] = str(base_model_name)
+        saved_config = RerankerConfig.from_mapping(config_values)
+        saved_config.save_json(output / INVARIRANK_CONFIG_NAME)
+        _save_json_mapping(
+            {
+                "artifact_type": artifact_type,
+                "base_model_name": str(base_model_name) if base_model_name else None,
+                "format_version": SAVED_FORMAT_VERSION,
+                "framework": "invarirank",
+                "package_version": _package_version(),
+            },
+            output / FRAMEWORK_METADATA_NAME,
+        )
+        _validate_saved_directory(output)
 
     def rank(
         self,
@@ -350,6 +433,106 @@ def _load_json_mapping(path: str | Path) -> dict[str, Any]:
     if not isinstance(values, dict):
         raise ValueError(f"JSON configuration must contain an object: {source}")
     return values
+
+
+def _looks_like_saved_directory(path: Path) -> bool:
+    return (path / INVARIRANK_CONFIG_NAME).exists() or (path / FRAMEWORK_METADATA_NAME).exists()
+
+
+def _validate_saved_directory(path: Path) -> tuple[RerankerConfig, dict[str, Any]]:
+    if not path.is_dir():
+        raise ValueError(f"Saved InvariRank path is not a directory: {path}")
+    required = [INVARIRANK_CONFIG_NAME, FRAMEWORK_METADATA_NAME, "tokenizer_config.json"]
+    missing = [name for name in required if not (path / name).is_file()]
+    if missing:
+        raise ValueError(f"Incomplete saved InvariRank directory {path}; missing: {', '.join(missing)}")
+    tokenizer_assets = ("tokenizer.json", "tokenizer.model", "spiece.model", "vocab.json", "vocab.txt")
+    if not _directory_has_any(path, tokenizer_assets):
+        raise ValueError(f"Incomplete saved InvariRank directory {path}; missing tokenizer vocabulary files.")
+
+    metadata = _load_json_mapping(path / FRAMEWORK_METADATA_NAME)
+    if metadata.get("framework") != "invarirank":
+        raise ValueError(f"Incompatible framework metadata in {path}: expected framework 'invarirank'.")
+    if metadata.get("format_version") != SAVED_FORMAT_VERSION:
+        raise ValueError(
+            f"Unsupported saved InvariRank format version in {path}: {metadata.get('format_version')!r}; "
+            f"expected {SAVED_FORMAT_VERSION}."
+        )
+    if not isinstance(metadata.get("package_version"), str) or not metadata["package_version"]:
+        raise ValueError(f"Saved InvariRank metadata is missing package_version: {path}")
+    artifact_type = metadata.get("artifact_type")
+    if artifact_type not in {"adapter", "model"}:
+        raise ValueError(f"Unsupported saved InvariRank artifact type in {path}: {artifact_type!r}.")
+
+    saved_config = RerankerConfig.from_json(path / INVARIRANK_CONFIG_NAME)
+    if artifact_type == "adapter":
+        if not (path / "adapter_config.json").is_file():
+            raise ValueError(f"Incomplete saved InvariRank adapter directory {path}; missing: adapter_config.json")
+        if not _directory_has_any(path, ("adapter_model.safetensors", "adapter_model.bin")):
+            raise ValueError(f"Incomplete saved InvariRank adapter directory {path}; missing adapter weights.")
+        base_model_name = metadata.get("base_model_name")
+        if not isinstance(base_model_name, str) or not base_model_name:
+            raise ValueError(f"Saved InvariRank adapter metadata is missing base_model_name: {path}")
+        if saved_config.model_name and saved_config.model_name != base_model_name:
+            raise ValueError(
+                f"Saved InvariRank adapter base model mismatch in {path}: "
+                f"config has {saved_config.model_name!r}, metadata has {base_model_name!r}."
+            )
+    else:
+        if not (path / "config.json").is_file():
+            raise ValueError(f"Incomplete saved InvariRank model directory {path}; missing: config.json")
+        model_weights = (
+            "model.safetensors",
+            "model.safetensors.index.json",
+            "pytorch_model.bin",
+            "pytorch_model.bin.index.json",
+        )
+        has_sharded_weights = any(path.glob("model-*.safetensors")) or any(path.glob("pytorch_model-*.bin"))
+        if not _directory_has_any(path, model_weights) and not has_sharded_weights:
+            raise ValueError(f"Incomplete saved InvariRank model directory {path}; missing model weights.")
+    return saved_config, metadata
+
+
+def _directory_has_any(path: Path, names: Sequence[str]) -> bool:
+    return any((path / name).is_file() for name in names)
+
+
+def _merge_saved_config(
+    saved: RerankerConfig,
+    override: RerankerConfig | Mapping[str, Any] | None,
+) -> RerankerConfig:
+    if override is None:
+        return saved
+    values = saved.to_dict()
+    if isinstance(override, RerankerConfig):
+        values.update(override.to_dict())
+    elif isinstance(override, Mapping):
+        values.update(override)
+    else:
+        raise TypeError("config must be a RerankerConfig, mapping, or None.")
+    values.update({"adapter_path": None, "model_name": saved.model_name})
+    return RerankerConfig.from_mapping(values)
+
+
+def _is_adapter_backbone(backbone: Any) -> bool:
+    return bool(getattr(backbone, "peft_config", None))
+
+
+def _adapter_base_model_name(backbone: Any) -> str | None:
+    peft_config = getattr(backbone, "peft_config", None)
+    configs = peft_config.values() if isinstance(peft_config, Mapping) else [peft_config]
+    for config in configs:
+        value = getattr(config, "base_model_name_or_path", None)
+        if value:
+            return str(value)
+    return None
+
+
+def _package_version() -> str:
+    try:
+        return version("invarirank")
+    except PackageNotFoundError:
+        return "0.1.0"
 
 
 def _validate_permutation(permutation: Sequence[int] | None, num_candidates: int) -> list[int]:
