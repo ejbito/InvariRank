@@ -8,6 +8,10 @@ The `invarirank` package provides two active capabilities:
 Position-bias analysis is a future downstream capability. The permutation suite executes rerankers and returns aligned
 evidence; it does not calculate position-bias, effectiveness, or paper-specific metrics.
 
+The published wheel contains this reusable package only. Dataset preparation, paper baselines, evaluation, experiment
+configs, and reproduction commands under `research/` are available from a repository checkout with the `research`
+dependency extra installed; they are not imported or installed by the core wheel.
+
 ## Ranking Data Contract
 
 Both capabilities use `RankingSample` and `RankingResult`. Dictionary samples are accepted and converted

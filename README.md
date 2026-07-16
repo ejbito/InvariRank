@@ -185,6 +185,11 @@ Install optional training, research, and development dependencies when working w
 pip install -e ".[train,research,dev]"
 ```
 
+The published wheel contains only the reusable `invarirank` package. The `research/` source tree and its YAML configs
+remain repository-only. To run paper experiments, work from a repository checkout, install the `research` extra, and
+invoke stages with `python -m research.run ...` from the repository root. The core distribution intentionally does not
+install an `invarirank-research` console command.
+
 Alternatively, `requirements.txt` installs the complete development environment:
 
 ```bash
