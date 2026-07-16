@@ -240,6 +240,8 @@ def make_span_item_block_mask(
         allowed[candidate_start:candidate_end, candidate_start:candidate_end] = True
 
     allowed &= attention_2d[0].bool().unsqueeze(0)
+    padding_positions = (~attention_2d[0].bool()).nonzero(as_tuple=False).flatten()
+    allowed[padding_positions, padding_positions] = True
     blocked = torch.finfo(dtype).min
     mask = torch.zeros((1, 1, sequence_length, sequence_length), device=device, dtype=dtype)
     return mask.masked_fill(~allowed, blocked)
@@ -254,6 +256,29 @@ def build_attention_mask(attention_2d: Any, span_info: SpanInfo, cfg: Any, dtype
         span_info,
         dtype,
         span_causal=bool(getattr(cfg, "span_causal", True)),
+    )
+
+
+def build_batched_attention_mask(attention_2d: Any, span_infos: list[SpanInfo], cfg: Any, dtype: Any) -> Any:
+    """Build one padded attention tensor for independently structured prompts."""
+    import torch
+
+    mode = parse_attention_mask_mode(getattr(cfg, "attention_mask", "causal"))
+    if mode is AttentionMaskMode.CAUSAL:
+        return make_4d_causal_mask_from_2d(attention_2d, dtype)
+    if len(span_infos) != int(attention_2d.shape[0]):
+        raise ValueError("Expected one SpanInfo per batch row.")
+    return torch.cat(
+        [
+            make_span_item_block_mask(
+                attention_2d[row : row + 1],
+                span_info,
+                dtype,
+                span_causal=bool(getattr(cfg, "span_causal", True)),
+            )
+            for row, span_info in enumerate(span_infos)
+        ],
+        dim=0,
     )
 
 
@@ -280,6 +305,22 @@ def build_position_ids(input_ids: Any, span_info: SpanInfo, cfg: Any) -> Any | N
     if mode is PositionIdMode.STANDARD:
         return None
     return make_shared_position_ids(input_ids, span_info)
+
+
+def build_batched_position_ids(input_ids: Any, attention_2d: Any, span_infos: list[SpanInfo], cfg: Any) -> Any:
+    """Build padding-independent position IDs for every batch row."""
+    import torch
+
+    mode = parse_position_id_mode(getattr(cfg, "position_ids", "standard"))
+    if mode is PositionIdMode.STANDARD:
+        positions = attention_2d.long().cumsum(dim=-1) - 1
+        return positions.masked_fill(~attention_2d.bool(), 0)
+    if len(span_infos) != int(input_ids.shape[0]):
+        raise ValueError("Expected one SpanInfo per batch row.")
+    return torch.cat(
+        [make_shared_position_ids(input_ids[row : row + 1], span_info) for row, span_info in enumerate(span_infos)],
+        dim=0,
+    )
 
 
 def validate_candidate_count(span_info: SpanInfo, expected: int) -> None:
@@ -323,13 +364,24 @@ class MeanLogProbListwiseScorer:
         return self.module.parameters()
 
     def __call__(self, input_ids: Any, attention_mask: Any):
+        scores = self.score_batch(input_ids, attention_mask)
+        if len(scores) != 1:
+            raise ValueError("Use score_batch() when scoring more than one prompt.")
+        return scores[0]
+
+    def score_batch(self, input_ids: Any, attention_mask: Any) -> list[Any]:
+        """Score a padded batch with one backbone forward pass."""
         import torch
         import torch.nn.functional as functional
 
-        span_info = self.span_extractor(input_ids)
+        if input_ids.ndim != 2 or attention_mask.ndim != 2:
+            raise ValueError("input_ids and attention_mask must be two-dimensional batch tensors.")
+        if input_ids.shape != attention_mask.shape:
+            raise ValueError("input_ids and attention_mask must have matching shapes.")
+        span_infos = [self.span_extractor(input_ids[row]) for row in range(int(input_ids.shape[0]))]
         dtype = next(self.backbone.parameters()).dtype
-        attention = build_attention_mask(attention_mask, span_info, self.cfg, dtype)
-        position_ids = build_position_ids(input_ids, span_info, self.cfg)
+        attention = build_batched_attention_mask(attention_mask, span_infos, self.cfg, dtype)
+        position_ids = build_batched_position_ids(input_ids, attention_mask, span_infos, self.cfg)
         outputs = self.backbone(
             input_ids=input_ids,
             attention_mask=attention,
@@ -345,12 +397,15 @@ class MeanLogProbListwiseScorer:
             index=labels.unsqueeze(-1),
         ).squeeze(-1)
 
-        scores = []
-        for start, end in span_info.candidate_spans:
-            shifted_start = max(start - 1, 0)
-            shifted_end = max(end - 1, shifted_start + 1)
-            scores.append(token_log_probabilities[0, shifted_start:shifted_end].mean())
-        return torch.stack(scores)
+        batch_scores = []
+        for row, span_info in enumerate(span_infos):
+            scores = []
+            for start, end in span_info.candidate_spans:
+                shifted_start = max(start - 1, 0)
+                shifted_end = max(end - 1, shifted_start + 1)
+                scores.append(token_log_probabilities[row, shifted_start:shifted_end].mean())
+            batch_scores.append(torch.stack(scores))
+        return batch_scores
 
 
 def align_scores_to_shared_candidates(scores_list: list[Any], permutations: list[list[int]]):
@@ -455,6 +510,8 @@ __all__ = [
     "SpanInfo",
     "align_scores_to_shared_candidates",
     "build_attention_mask",
+    "build_batched_attention_mask",
+    "build_batched_position_ids",
     "build_lora_model",
     "build_model_for_ranking",
     "build_permutation_rank_record",

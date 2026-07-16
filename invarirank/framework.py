@@ -188,6 +188,21 @@ class Reranker(ABC):
     ) -> RankingResult:
         """Score and order every candidate in a sample."""
 
+    def rank_many(
+        self,
+        samples: Sequence[
+            RankingSample | Mapping[str, Any] | tuple[RankingSample | Mapping[str, Any], Sequence[int] | None]
+        ],
+        *,
+        permutations: Sequence[Sequence[int] | None] | None = None,
+        batch_size: int = 1,
+    ) -> list[RankingResult]:
+        """Rank requests in order, safely falling back to repeated single calls."""
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer.")
+        requests = _normalize_rank_requests(samples, permutations)
+        return [self.rank(sample, permutation=permutation) for sample, permutation in requests]
+
 
 class InvariRankReranker(Reranker):
     """Framework facade backed by the current tested InvariRank implementation."""
@@ -238,62 +253,54 @@ class InvariRankReranker(Reranker):
         *,
         permutation: Sequence[int] | None = None,
     ) -> RankingResult:
+        return self.rank_many([(sample, permutation)], batch_size=1)[0]
+
+    def rank_many(
+        self,
+        samples: Sequence[
+            RankingSample | Mapping[str, Any] | tuple[RankingSample | Mapping[str, Any], Sequence[int] | None]
+        ],
+        *,
+        permutations: Sequence[Sequence[int] | None] | None = None,
+        batch_size: int = 8,
+    ) -> list[RankingResult]:
+        """Rank recommendation samples in padded model-forward batches."""
         import torch
 
-        from .prompts import build_prompt, candidate_id
+        from .prompts import build_prompt
 
-        ranking_sample = sample if isinstance(sample, RankingSample) else RankingSample.from_dict(sample)
-        num_candidates = len(ranking_sample.candidates)
-        resolved_permutation = _validate_permutation(permutation, num_candidates)
-        sample_dict = ranking_sample.to_dict()
-        prompt = build_prompt(sample_dict, resolved_permutation, self._legacy_config)
-        encoded = self.tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=self.config.max_length,
-        )
-        input_ids = encoded["input_ids"].to(self.device)
-        attention_mask = encoded["attention_mask"].to(self.device)
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer.")
+        requests = _normalize_rank_requests(samples, permutations)
+        prepared: list[tuple[RankingSample, list[int], str]] = []
+        for sample, permutation in requests:
+            ranking_sample = sample if isinstance(sample, RankingSample) else RankingSample.from_dict(sample)
+            resolved = _validate_permutation(permutation, len(ranking_sample.candidates))
+            prompt = build_prompt(ranking_sample.to_dict(), resolved, self._legacy_config)
+            prepared.append((ranking_sample, resolved, prompt))
 
+        results: list[RankingResult] = []
         self.scorer.eval()
-        with torch.no_grad():
-            scores = self.scorer(input_ids, attention_mask).detach().float().cpu()
-
-        if scores.numel() != num_candidates:
-            raise ValueError(
-                f"The tokenized prompt produced {scores.numel()} candidate scores for {num_candidates} candidates. "
-                "Increase max_length or shorten the history/candidate text."
+        for start in range(0, len(prepared), batch_size):
+            chunk = prepared[start : start + batch_size]
+            encoded = self.tokenizer(
+                [prompt for _, _, prompt in chunk],
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.config.max_length,
             )
-
-        ranked_items = []
-        for input_position, candidate_index in enumerate(resolved_permutation):
-            candidate = ranking_sample.candidates[candidate_index]
-            relevance = candidate.get("relevance")
-            ranked_items.append(
-                RankedItem(
-                    candidate_index=candidate_index,
-                    item_id=candidate_id(candidate, candidate_index),
-                    score=float(scores[input_position].item()),
-                    input_position=input_position,
-                    relevance=None if relevance is None else int(relevance),
-                    candidate=dict(candidate),
-                )
+            input_ids = encoded["input_ids"].to(self.device)
+            attention_mask = encoded["attention_mask"].to(self.device)
+            with torch.no_grad():
+                score_batch = [
+                    scores.detach().float().cpu() for scores in self.scorer.score_batch(input_ids, attention_mask)
+                ]
+            results.extend(
+                _build_ranking_result(ranking_sample, resolved, scores)
+                for (ranking_sample, resolved, _), scores in zip(chunk, score_batch, strict=True)
             )
-        ranked_items.sort(key=lambda item: (-item.score, item.input_position))
-
-        return RankingResult(
-            user_id=ranking_sample.user_id,
-            items=tuple(ranked_items),
-            permutation=tuple(resolved_permutation),
-            split=ranking_sample.split,
-            metadata={
-                "method": "invarirank",
-                "output_backend": "span_logprob",
-                "prompt_family": "invarirank_marker",
-                "prompt_version": "invarirank-marker-v1",
-            },
-        )
+        return results
 
 
 def _coerce_config(config: RerankerConfig | Mapping[str, Any] | None) -> RerankerConfig:
@@ -311,3 +318,65 @@ def _validate_permutation(permutation: Sequence[int] | None, num_candidates: int
     if len(resolved) != num_candidates or set(resolved) != set(range(num_candidates)):
         raise ValueError(f"permutation must contain every candidate index from 0 to {num_candidates - 1} exactly once.")
     return resolved
+
+
+def _normalize_rank_requests(
+    samples: Sequence[
+        RankingSample | Mapping[str, Any] | tuple[RankingSample | Mapping[str, Any], Sequence[int] | None]
+    ],
+    permutations: Sequence[Sequence[int] | None] | None,
+) -> list[tuple[RankingSample | Mapping[str, Any], Sequence[int] | None]]:
+    values = list(samples)
+    if permutations is not None:
+        if len(permutations) != len(values):
+            raise ValueError("permutations must contain one entry per sample.")
+        if any(isinstance(value, tuple) for value in values):
+            raise ValueError("Do not combine request tuples with the permutations argument.")
+        return list(zip(values, permutations, strict=True))  # type: ignore[arg-type]
+
+    requests = []
+    for value in values:
+        if isinstance(value, tuple):
+            if len(value) != 2:
+                raise ValueError("Rank request tuples must contain (sample, permutation).")
+            requests.append((value[0], value[1]))
+        else:
+            requests.append((value, None))
+    return requests
+
+
+def _build_ranking_result(sample: RankingSample, permutation: list[int], scores: Any) -> RankingResult:
+    from .prompts import candidate_id
+
+    if int(scores.numel()) != len(sample.candidates):
+        raise ValueError(
+            f"The tokenized prompt produced {scores.numel()} candidate scores for {len(sample.candidates)} candidates. "
+            "Increase max_length or shorten the history/candidate text."
+        )
+    ranked_items = []
+    for input_position, candidate_index in enumerate(permutation):
+        candidate = sample.candidates[candidate_index]
+        relevance = candidate.get("relevance")
+        ranked_items.append(
+            RankedItem(
+                candidate_index=candidate_index,
+                item_id=candidate_id(candidate, candidate_index),
+                score=float(scores[input_position].item()),
+                input_position=input_position,
+                relevance=None if relevance is None else int(relevance),
+                candidate=dict(candidate),
+            )
+        )
+    ranked_items.sort(key=lambda item: (-item.score, item.input_position))
+    return RankingResult(
+        user_id=sample.user_id,
+        items=tuple(ranked_items),
+        permutation=tuple(permutation),
+        split=sample.split,
+        metadata={
+            "method": "invarirank",
+            "output_backend": "span_logprob",
+            "prompt_family": "invarirank_marker",
+            "prompt_version": "invarirank-marker-v1",
+        },
+    )
