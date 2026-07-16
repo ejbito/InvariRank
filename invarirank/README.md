@@ -1,12 +1,56 @@
 # InvariRank Framework Guide
 
-The `invarirank` package provides the recommendation-specific InvariRank architecture and a domain-neutral controlled
-permutation suite.
+The `invarirank` package provides two active capabilities:
 
-## Recommendation Inference
+1. Recommendation-specific InvariRank inference and training.
+2. Domain-neutral controlled input-order experiments for compatible rerankers.
 
-`InvariRankReranker` receives recommendation candidates from an upstream retriever. It does not retrieve from a full
-catalogue itself.
+Position-bias analysis is a future downstream capability. The permutation suite executes rerankers and returns aligned
+evidence; it does not calculate position-bias, effectiveness, or paper-specific metrics.
+
+## Ranking Data Contract
+
+Both capabilities use `RankingSample` and `RankingResult`. Dictionary samples are accepted and converted
+automatically:
+
+```python
+sample = {
+    "user_id": "u1",
+    "history": [
+        {"item_id": "h1", "title": "Previously selected item"},
+    ],
+    "candidates": [
+        {"item_id": "a", "title": "Alpha", "relevance": 0},
+        {"item_id": "b", "title": "Beta", "relevance": 1},
+        {"item_id": "c", "title": "Gamma", "relevance": 0},
+    ],
+}
+```
+
+A sample must contain at least one candidate. Candidate dictionaries are preserved in results. Order callbacks
+additionally require every candidate to have a unique non-empty ID under `item_id`, `id`, `asin`, or
+`movie_id`.
+
+The InvariRank architecture uses `user_id`, `history`, and recommendation item metadata. External callbacks may
+store domain-neutral context as an additional top-level field:
+
+```python
+sample = {
+    "user_id": "query-7",
+    "context": {"query": "position-invariant ranking"},
+    "candidates": [
+        {"item_id": "doc-a", "text": "First document"},
+        {"item_id": "doc-b", "text": "Second document"},
+    ],
+}
+```
+
+Unknown top-level fields are available to callbacks through `sample.metadata`, so this example uses
+`sample.metadata["context"]`. The package does not build external prompts or parse generated outputs.
+
+## Normal and Batched Ranking
+
+`InvariRankReranker` receives candidates from an upstream retriever; it does not retrieve from a full catalogue.
 
 ```python
 from invarirank import InvariRankReranker, RerankerConfig
@@ -21,67 +65,269 @@ result = reranker.rank(sample)
 results = reranker.rank_many(samples, batch_size=8)
 ```
 
-`rank_many` preserves sample order and accepts `permutations=[...]` when each sample needs a specified candidate input
-order. Candidate counts and prompt lengths may differ inside a batch; prompts are padded and reconstructed per row.
+`rank_many` preserves sample order. Candidate counts and prompt lengths may differ inside a batch. Supply one
+optional candidate-index permutation per sample when input orders are already known:
 
-## Permutation Experiments
+```python
+results = reranker.rank_many(
+    samples,
+    permutations=[[2, 0, 1], [1, 2, 0]],
+    batch_size=8,
+)
+```
+
+Every permutation must contain each original candidate index exactly once.
+
+## PermutationSuite
 
 ```python
 from invarirank import PermutationSuite
 
 suite = PermutationSuite(reranker)
+```
 
-random_results = suite.random(sample, count=6, seed=42, batch_size=8)
-fixed_results = suite.fixed(sample, item=0, position=0, count=2, seed=42)
-sweep_results = suite.sweep(sample, item=0, repeats=2, seed=42)
-template_results = suite.templates(
+All item indices and positions are zero-based:
+
+- `item` is an index in the original `sample["candidates"]` list.
+- `position` is a position in the input order presented to the reranker.
+- Every operation returns `list[RankingResult]`.
+- The suite preserves original candidate identity; temporary input positions never replace original indices.
+
+### Random permutations
+
+```python
+results = suite.random(
     sample,
-    templates=[[0, None, None], [None, 0, None], [2, 0, 1]],
+    count=6,
     seed=42,
+    include_identity=True,
+    batch_size=8,
 )
 ```
 
-Random and controlled completions are unique. Requests exceeding the number of possible unique permutations raise an
-error. `random` returns the identity first by default. `sweep` returns positions in ascending order, with each
-position's repeats adjacent. `templates` preserves template order; complete templates run exactly as supplied.
+`random` returns `count` unique input orders. With `include_identity=True`, the original order is returned first.
+Set it to `False` to exclude that order. The remaining order is deterministic for a given seed.
+
+For `n` candidates, at most `n!` unique permutations exist, or `n! - 1` when identity is excluded. Requesting
+more raises `ValueError`. For the three-candidate example above, the maximum is six.
+
+### Fixed-position permutations
+
+```python
+results = suite.fixed(
+    sample,
+    item=0,
+    position=1,
+    count=2,
+    seed=42,
+    batch_size=8,
+)
+```
+
+`fixed` keeps one original candidate at one required input position and randomizes the remaining candidates. It
+returns `count` unique completions in deterministic seeded order. At most `(n - 1)!` completions exist.
+
+### Complete position sweep
+
+```python
+results = suite.sweep(
+    sample,
+    item=0,
+    repeats=2,
+    seed=42,
+    batch_size=8,
+)
+```
+
+`sweep` places the selected item at every input position. Results are grouped by ascending position; each position
+has `repeats` adjacent unique completions. The result count is `n * repeats`, and `repeats` cannot exceed
+`(n - 1)!`.
+
+For the three-candidate example, the selected item's positions are:
+
+```python
+[result.permutation.index(0) for result in results]
+# [0, 0, 1, 1, 2, 2]
+```
+
+### Exact and partial templates
+
+```python
+results = suite.templates(
+    sample,
+    templates=[
+        [0, None, None],
+        [None, 0, None],
+        [None, None, 0],
+        [2, 0, 1],
+    ],
+    seed=42,
+    batch_size=8,
+)
+```
+
+Each template describes one input order:
+
+- An integer fixes that original candidate at that position.
+- `None` fills the position from a seeded shuffle of the unused candidates.
+- Fixed indices must be unique and in range.
+- A template must have exactly one entry per candidate.
+- A complete template is executed exactly as supplied.
+- Templates are returned in the same order they were provided.
+
+Each partial template produces one randomized completion, not every possible completion. Repeat a template explicitly
+with a different suite call or seed when multiple independently seeded completions are needed.
 
 ## External Score Reranker
+
+`CallableReranker.from_scores` adapts a model that returns one score per presented item:
 
 ```python
 from invarirank import CallableReranker, PermutationSuite
 
 
 def score_items(sample, ordered_items):
-    return my_model.score(sample, ordered_items)
+    query = sample.metadata["context"]["query"]
+    return [my_model.score(query, item["text"]) for item in ordered_items]
 
 
-reranker = CallableReranker.from_scores(score_items)
-results = PermutationSuite(reranker).random(sample, count=6, seed=42)
+reranker = CallableReranker.from_scores(
+    score_items,
+    higher_is_better=True,
+    method_name="my_score_model",
+)
+
+result = reranker.rank(sample, permutation=[1, 0])
+results = PermutationSuite(reranker).random(sample, count=2, seed=42)
 ```
 
-The callback receives candidates in the tested input order and returns one finite score per candidate in that same
-order. Higher scores rank first. Set `higher_is_better=False` for losses or distances; returned `RankingResult` scores
-are then negated so the shared result contract still uses higher-is-better scores.
+`ordered_items` follows the tested input permutation. The callback must return exactly one finite numeric score per
+item in that same order. Higher scores rank first by default. With `higher_is_better=False`, callback values are
+negated in `RankingResult` so the shared result contract remains higher-is-better.
 
-An optional `batch_score_fn(samples, ordered_item_batches)` enables one external callback per chunk.
+### Batched score callback
+
+```python
+def batch_score_items(samples, ordered_item_batches):
+    return [
+        [
+            my_model.score(sample.metadata["context"]["query"], item["text"])
+            for item in ordered_items
+        ]
+        for sample, ordered_items in zip(samples, ordered_item_batches)
+    ]
+
+
+reranker = CallableReranker.from_scores(
+    score_items,
+    batch_score_fn=batch_score_items,
+)
+
+results = reranker.rank_many(samples, batch_size=8)
+```
+
+The batch callback is invoked once per chunk, must preserve request order, and must return one score row per request.
+Without it, `rank_many` safely calls the single-item callback repeatedly.
 
 ## External Generated-Order Reranker
 
+`CallableReranker.from_order` adapts a model or parser that returns item IDs from best to worst:
+
 ```python
 def generate_order(sample, ordered_items):
-    prompt = build_my_prompt(sample, ordered_items)
+    prompt = build_my_prompt(sample.metadata["context"], ordered_items)
     output = my_model.generate(prompt)
     return parse_ordered_item_ids(output)
 
 
-reranker = CallableReranker.from_order(generate_order)
+reranker = CallableReranker.from_order(
+    generate_order,
+    method_name="my_generated_reranker",
+)
+
+result = reranker.rank(sample, permutation=[1, 0])
 ```
 
-Order callbacks return every candidate item ID exactly once, from best to worst. Missing input IDs and unknown,
-duplicate, or missing output IDs raise errors. An optional `batch_order_fn` provides batched execution.
+The callback must return every input candidate ID exactly once. Unknown, duplicate, or missing IDs raise
+`ValueError`. The adapter converts output ranks to deterministic higher-is-better scores.
 
-## Result Boundary
+### Batched order callback
 
-Every operation returns `RankingResult` objects containing original candidate identity, input position, exact input
-permutation, output order, score, relevance, and candidate metadata. The suite does not calculate effectiveness,
-robustness, paper-validity, or position-bias metrics. Paper evaluation remains under `research/`.
+```python
+def batch_generate_orders(samples, ordered_item_batches):
+    return [
+        generate_order(sample, ordered_items)
+        for sample, ordered_items in zip(samples, ordered_item_batches)
+    ]
+
+
+reranker = CallableReranker.from_order(
+    generate_order,
+    batch_order_fn=batch_generate_orders,
+)
+
+results = reranker.rank_many(samples, batch_size=8)
+```
+
+Without `batch_order_fn`, batched ranking falls back to repeated `generate_order` calls.
+
+## Pairwise Ranking
+
+Two candidates use the normal API; no separate pairwise abstraction is required:
+
+```python
+pairwise_results = PermutationSuite(reranker).random(
+    pairwise_sample,
+    count=2,
+    seed=42,
+)
+```
+
+The two possible input orders are tested and returned as ordinary `RankingResult` objects.
+
+## Inspecting and Exporting Results
+
+```python
+for result in results:
+    print("input permutation:", result.permutation)
+    for output_rank, item in enumerate(result.items):
+        print(output_rank, item.candidate_index, item.item_id, item.input_position, item.score)
+```
+
+Individual results provide `to_dict()`. A collection can be exported manually:
+
+```python
+import json
+from pathlib import Path
+
+records = [result.to_dict() for result in results]
+Path("permutation_results.json").write_text(
+    json.dumps(records, indent=2),
+    encoding="utf-8",
+)
+```
+
+This is a plain result export, not the planned versioned `PermutationRun` persistence format. It does not record the
+experiment mode and settings automatically. Candidate and metadata values must also be JSON-compatible.
+
+## Validation Summary
+
+The suite rejects:
+
+- Empty candidate sets.
+- Invalid or incomplete permutations.
+- Non-positive counts, repeats, and batch sizes.
+- Out-of-range item indices and positions.
+- Templates with the wrong length, duplicate fixed indices, or out-of-range indices.
+- Requests for more unique permutations than mathematically possible.
+- Score rows with the wrong length, non-numeric values, `NaN`, or infinity.
+- Batch callbacks returning the wrong number of rows.
+- Order callbacks with absent input IDs or unknown, duplicate, or missing output IDs.
+
+## Metrics and Persistence Boundary
+
+The suite returns aligned ranking evidence. General effectiveness and stability metrics are not calculated here;
+paper-specific HR, NDCG, Kendall, Spearman, top-k overlap, PPI, GPI, PCR, and LRI remain in `research/`.
+
+Versioned experiment persistence is also not implemented yet. A future `PermutationRun` may record mode, seed,
+settings, sample identity, and results for later robustness or position-bias analysis without model access.
