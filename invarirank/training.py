@@ -9,7 +9,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from .framework import InvariRankReranker, RankingSample, RerankerConfig
+from .framework import (
+    InvariRankReranker,
+    RankingSample,
+    RerankerConfig,
+    _load_json_mapping,
+    _save_json_mapping,
+)
 from .modeling import (
     align_scores_to_shared_candidates,
     build_lora_model,
@@ -107,6 +113,22 @@ class TrainingConfig:
         if "lora_target_modules" in kwargs:
             kwargs["lora_target_modules"] = tuple(kwargs["lora_target_modules"])
         return cls(**kwargs, extras=data)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a round-trippable, JSON-compatible configuration mapping."""
+        values = asdict(self)
+        extras = values.pop("extras")
+        values["lora_target_modules"] = list(values["lora_target_modules"])
+        return {**extras, **values}
+
+    def save_json(self, path: str | Path) -> None:
+        """Save this configuration as human-readable JSON."""
+        _save_json_mapping(self.to_dict(), path)
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> TrainingConfig:
+        """Load and validate a configuration from JSON."""
+        return cls.from_mapping(_load_json_mapping(path))
 
     def to_namespace(self, **overrides: Any) -> SimpleNamespace:
         values = dict(self.extras)

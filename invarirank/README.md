@@ -78,6 +78,26 @@ results = reranker.rank_many(
 
 Every permutation must contain each original candidate index exactly once.
 
+## Configuration Serialization
+
+Inference and training configurations can be converted to ordinary dictionaries or saved as JSON:
+
+```python
+from invarirank import RerankerConfig, TrainingConfig
+
+reranker_config = RerankerConfig(device="cuda", max_length=4096)
+reranker_config.save_json("configs/reranker.json")
+reranker_config = RerankerConfig.from_json("configs/reranker.json")
+
+training_config = TrainingConfig(total_optimizer_steps=500)
+training_config.save_json("configs/training.json")
+training_config = TrainingConfig.from_json("configs/training.json")
+```
+
+Use `to_dict()` when a configuration mapping is needed directly. Unknown configuration fields retained in `extras`
+are flattened back into the serialized mapping. Loading JSON reruns normal configuration validation. These files store
+configuration only; saving and reloading complete model directories is implemented separately.
+
 ## PermutationSuite
 
 ```python

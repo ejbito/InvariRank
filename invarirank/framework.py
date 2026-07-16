@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -127,6 +129,7 @@ class RerankerConfig:
     extras: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "extras", dict(self.extras or {}))
         if self.max_length <= 0:
             raise ValueError("max_length must be greater than zero.")
         if self.attention_mask not in {"block", "causal"}:
@@ -166,6 +169,21 @@ class RerankerConfig:
         resolved["attention_mask"], resolved["position_ids"] = architectures[method]
         resolved["prompt_template"] = "invarirank"
         return cls.from_mapping(resolved)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a round-trippable configuration mapping with flattened extras."""
+        values = asdict(self)
+        extras = values.pop("extras")
+        return {**extras, **values}
+
+    def save_json(self, path: str | Path) -> None:
+        """Save this configuration as human-readable JSON."""
+        _save_json_mapping(self.to_dict(), path)
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> RerankerConfig:
+        """Load and validate a configuration from JSON."""
+        return cls.from_mapping(_load_json_mapping(path))
 
     def to_namespace(self, **overrides: Any) -> SimpleNamespace:
         values = dict(self.extras)
@@ -311,6 +329,27 @@ def _coerce_config(config: RerankerConfig | Mapping[str, Any] | None) -> Reranke
     if isinstance(config, Mapping):
         return RerankerConfig.from_mapping(config)
     raise TypeError("config must be a RerankerConfig, mapping, or None.")
+
+
+def _save_json_mapping(values: Mapping[str, Any], path: str | Path) -> None:
+    output = Path(path)
+    try:
+        payload = json.dumps(dict(values), indent=2, sort_keys=True) + "\n"
+    except TypeError as exc:
+        raise TypeError(f"Configuration contains a value that cannot be serialized to JSON: {output}") from exc
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(payload, encoding="utf-8")
+
+
+def _load_json_mapping(path: str | Path) -> dict[str, Any]:
+    source = Path(path)
+    try:
+        values = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON configuration: {source}") from exc
+    if not isinstance(values, dict):
+        raise ValueError(f"JSON configuration must contain an object: {source}")
+    return values
 
 
 def _validate_permutation(permutation: Sequence[int] | None, num_candidates: int) -> list[int]:
