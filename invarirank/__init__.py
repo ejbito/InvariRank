@@ -9,11 +9,14 @@ from .framework import (
     Reranker,
     RerankerConfig,
 )
+from .permutations import CallableReranker, PermutationSuite
 from .training import Trainer, TrainingConfig
 
 __all__ = [
     "FINE_TUNED_METHODS",
+    "CallableReranker",
     "InvariRankReranker",
+    "PermutationSuite",
     "RankedItem",
     "RankingResult",
     "RankingSample",
