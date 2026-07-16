@@ -294,7 +294,10 @@ trainer = Trainer.from_pretrained(
 trainer.train(output_dir="runs/train/my_invarirank_model")
 ```
 
-The framework provides LambdaRank optimization, optional permutation-consistency loss, LoRA fine-tuning, validation over candidate permutations, and checkpointing.
+Every training and validation candidate must provide a non-negative integer `relevance` label. Binary `0`/`1` and
+graded integer labels are supported; missing, negative, boolean, floating-point, and string labels are rejected before
+tokenization. The framework provides LambdaRank optimization, optional permutation-consistency loss, LoRA
+fine-tuning, validation over candidate permutations, and checkpointing.
 
 ### 1. Generate Candidate Lists
 

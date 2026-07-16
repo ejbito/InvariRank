@@ -5,6 +5,7 @@ import math
 import random
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, replace
+from numbers import Integral
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -177,6 +178,7 @@ def sample_permutation(count: int, *, deterministic: bool = False, seed: int | N
 
 class ListwiseRankingDataset:
     def __init__(self, samples: list[dict[str, Any]], cfg: Any, tokenizer: Any, *, mode: str = "train"):
+        _validate_relevance_labels(samples, f"{mode} dataset")
         self.samples = samples
         self.cfg = cfg
         self.tokenizer = tokenizer
@@ -472,6 +474,8 @@ class Trainer:
         self.config = _coerce_training_config(config)
         if not self.train_samples:
             raise ValueError("Trainer requires at least one training sample.")
+        _validate_relevance_labels(self.train_samples, "training")
+        _validate_relevance_labels(self.validation_samples, "validation")
 
     @classmethod
     def from_pretrained(
@@ -483,6 +487,10 @@ class Trainer:
         reranker_config: RerankerConfig | Mapping[str, Any] | None = None,
         training_config: TrainingConfig | Mapping[str, Any] | None = None,
     ) -> Trainer:
+        resolved_train_samples = [_sample_to_dict(sample) for sample in train_samples]
+        resolved_validation_samples = [_sample_to_dict(sample) for sample in validation_samples]
+        _validate_relevance_labels(resolved_train_samples, "training")
+        _validate_relevance_labels(resolved_validation_samples, "validation")
         framework_config = (
             reranker_config
             if isinstance(reranker_config, RerankerConfig)
@@ -498,7 +506,7 @@ class Trainer:
         tokenizer = load_tokenizer(cfg)
         backbone = build_lora_model(cfg, tokenizer, device)
         reranker = InvariRankReranker(backbone, tokenizer, framework_config, device=device)
-        return cls(reranker, train_samples, validation_samples, train_config)
+        return cls(reranker, resolved_train_samples, resolved_validation_samples, train_config)
 
     def train(self, *, output_dir: str | Path) -> dict[str, Any]:
         import torch
@@ -634,6 +642,34 @@ def _coerce_training_config(config: TrainingConfig | Mapping[str, Any] | None) -
 
 def _sample_to_dict(sample: RankingSample | Mapping[str, Any]) -> dict[str, Any]:
     return sample.to_dict() if isinstance(sample, RankingSample) else dict(sample)
+
+
+def _validate_relevance_labels(samples: list[dict[str, Any]], split: str) -> None:
+    for sample_index, sample in enumerate(samples):
+        candidates = sample.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            raise ValueError(f"{split.capitalize()} sample {sample_index} must contain at least one candidate.")
+        for candidate_index, candidate in enumerate(candidates):
+            if not isinstance(candidate, Mapping):
+                raise TypeError(
+                    f"{split.capitalize()} sample {sample_index} candidate {candidate_index} must be a mapping."
+                )
+            if "relevance" not in candidate:
+                raise ValueError(
+                    f"{split.capitalize()} sample {sample_index} candidate {candidate_index} is missing the required "
+                    "relevance label."
+                )
+            relevance = candidate["relevance"]
+            if isinstance(relevance, bool) or not isinstance(relevance, Integral):
+                raise TypeError(
+                    f"{split.capitalize()} sample {sample_index} candidate {candidate_index} relevance must be a "
+                    f"non-negative integer, got {type(relevance).__name__}."
+                )
+            if relevance < 0:
+                raise ValueError(
+                    f"{split.capitalize()} sample {sample_index} candidate {candidate_index} relevance must be "
+                    f"non-negative, got {relevance}."
+                )
 
 
 __all__ = [

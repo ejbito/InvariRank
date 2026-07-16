@@ -147,6 +147,28 @@ backbone, the directory stores the complete model through its Hugging Face `save
 fails early for missing tokenizer/configuration files, unsupported format versions or artifact types, invalid
 framework metadata, missing adapter provenance, and base-model mismatches.
 
+## Framework Training
+
+`Trainer` accepts the same recommendation samples as inference, but every candidate in both the training and
+validation collections must also contain a `relevance` label. Labels must be non-negative integers: use `0` and `1`
+for binary relevance or larger integers for graded relevance. Missing labels, negative values, booleans, floats, and
+strings are rejected when the trainer is created, before prompt tokenization or optimization begins.
+
+```python
+from invarirank import Trainer, TrainingConfig
+
+trainer = Trainer(
+    reranker,
+    train_samples,
+    validation_samples,
+    TrainingConfig(total_optimizer_steps=500),
+)
+trainer.train(output_dir="runs/train/my_invarirank_model")
+```
+
+Candidate labels are permuted with their original candidate indices, preserving score/label alignment in every
+LambdaRank and validation pass.
+
 ## PermutationSuite
 
 ```python

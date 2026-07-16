@@ -77,7 +77,7 @@ def format_candidate_item(item: Mapping[str, Any], template: Mapping[str, Any] |
 
 
 def extract_relevance_labels(sample: Mapping[str, Any], permutation: Sequence[int]) -> list[int]:
-    return [int(sample["candidates"][index].get("relevance", 0)) for index in permutation]
+    return [int(sample["candidates"][index]["relevance"]) for index in permutation]
 
 
 def build_prompt(sample: Mapping[str, Any], permutation: Sequence[int], cfg: Any) -> str:
