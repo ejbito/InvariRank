@@ -332,7 +332,7 @@ def train_step(
         for encoding, relevance in zip(batch["tokenized"], batch["relevance"]):
             input_ids = encoding["input_ids"].to(device)
             attention_mask = encoding["attention_mask"].to(device)
-            scores = scorer(input_ids, attention_mask)
+            scores = scorer(input_ids, attention_mask, expected_candidates=len(relevance))
             relevance_tensor = torch.tensor(relevance, device=device, dtype=torch.float32)[: scores.numel()]
             scores_list.append(scores)
             relevance_list.append(relevance_tensor)
@@ -392,6 +392,7 @@ def evaluate_validation(loader: Any, scorer: Any, cfg: Any) -> dict[str, float]:
                     scorer(
                         encoding["input_ids"].to(device),
                         encoding["attention_mask"].to(device),
+                        expected_candidates=len(batch["relevance"][len(scores_list)]),
                     )
                 )
             first_scores = scores_list[0]

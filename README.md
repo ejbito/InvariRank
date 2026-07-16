@@ -108,6 +108,10 @@ for item in result.items:
     print(item.item_id, item.score)
 ```
 
+The framework validates decoder-only model compatibility and structural marker tokenization when the reranker is
+created. It also rejects prompts whose candidate markers were removed by `max_length` truncation before running the
+model.
+
 `RankingSample`, `RankedItem`, `RankingResult`, `RerankerConfig`, and `Reranker` form the typed public framework contract. Dictionary samples remain supported for straightforward integration.
 
 ## Repository Structure

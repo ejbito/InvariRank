@@ -237,13 +237,20 @@ class InvariRankReranker(Reranker):
         *,
         device: Any | None = None,
     ) -> None:
-        from .modeling import MeanLogProbListwiseScorer, select_device
+        from .modeling import (
+            MeanLogProbListwiseScorer,
+            select_device,
+            validate_model_architecture,
+            validate_special_tokens,
+        )
 
         self.config = _coerce_config(config)
         self.device = device if device is not None else select_device(self.config.device)
         self.tokenizer = tokenizer
         self.backbone = backbone
         self._legacy_config = self.config.to_namespace(device=str(self.device))
+        validate_special_tokens(tokenizer, self._legacy_config)
+        validate_model_architecture(backbone)
         self.scorer = MeanLogProbListwiseScorer(backbone, tokenizer, self._legacy_config).to(self.device)
         self.scorer.eval()
 
@@ -396,7 +403,12 @@ class InvariRankReranker(Reranker):
             attention_mask = encoded["attention_mask"].to(self.device)
             with torch.no_grad():
                 score_batch = [
-                    scores.detach().float().cpu() for scores in self.scorer.score_batch(input_ids, attention_mask)
+                    scores.detach().float().cpu()
+                    for scores in self.scorer.score_batch(
+                        input_ids,
+                        attention_mask,
+                        expected_candidate_counts=[len(sample.candidates) for sample, _, _ in chunk],
+                    )
                 ]
             results.extend(
                 _build_ranking_result(ranking_sample, resolved, scores)

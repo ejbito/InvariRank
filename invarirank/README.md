@@ -85,6 +85,12 @@ results = reranker.rank_many(
 Every permutation must contain each original candidate index exactly once, and indices must be integers (not strings,
 floats, or booleans). Invalid recommendation inputs and permutations are rejected before model inference.
 
+InvariRank requires a decoder-only causal language model whose forward interface accepts `input_ids`,
+`attention_mask`, `position_ids`, and `use_cache`. Each configured structural marker must map to one distinct tokenizer
+token. Tokenized prompts must retain the shared span and every candidate span; if `max_length` truncates required
+markers, inference fails before the model runs and reports how to shorten the input or increase the limit. The same
+candidate-count check protects framework training batches.
+
 ## Configuration Serialization
 
 Inference and training configurations can be converted to ordinary dictionaries or saved as JSON:

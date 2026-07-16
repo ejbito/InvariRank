@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -66,17 +68,58 @@ def validate_special_tokens(tokenizer: Any, cfg: Any) -> None:
     unknown_id = getattr(tokenizer, "unk_token_id", None)
     missing = []
     split = []
+    inconsistent = []
+    token_ids = []
     for token in tokens:
         token_id = tokenizer.convert_tokens_to_ids(token)
         if token_id is None or token_id < 0 or token_id == unknown_id:
             missing.append(token)
         encoded = tokenizer(token, add_special_tokens=False)["input_ids"]
+        if getattr(encoded, "ndim", 1) == 2:
+            encoded = encoded[0]
+        if isinstance(encoded, (list, tuple)) and encoded and isinstance(encoded[0], (list, tuple)):
+            encoded = encoded[0]
         if len(encoded) != 1:
             split.append(token)
+        elif token_id != int(encoded[0]):
+            inconsistent.append(token)
+        token_ids.append(token_id)
     if missing:
         raise ValueError(f"Special token(s) missing from tokenizer vocabulary: {missing}")
     if split:
         raise ValueError(f"Special token(s) do not tokenize as single tokens: {split}")
+    if inconsistent:
+        raise ValueError(f"Special token lookup and tokenization disagree for: {inconsistent}")
+    if len(set(token_ids)) != len(token_ids):
+        raise ValueError("Structural marker tokens must map to distinct tokenizer IDs.")
+
+
+def validate_model_architecture(model: Any) -> None:
+    """Reject model interfaces that cannot support InvariRank scoring."""
+    config = getattr(model, "config", None)
+    if config is not None and bool(getattr(config, "is_encoder_decoder", False)):
+        model_type = getattr(config, "model_type", type(model).__name__)
+        raise ValueError(
+            f"Unsupported model architecture {model_type!r}: InvariRank requires a decoder-only causal language "
+            "model, not an encoder-decoder model."
+        )
+
+    forward = getattr(model, "forward", None)
+    if not callable(forward):
+        raise TypeError("Unsupported model architecture: backbone must define a callable forward method.")
+    try:
+        parameters = inspect.signature(forward).parameters.values()
+    except (TypeError, ValueError):
+        return
+    parameter_names = {parameter.name for parameter in parameters}
+    accepts_keywords = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+    required = {"input_ids", "attention_mask", "position_ids", "use_cache"}
+    missing = sorted(required - parameter_names) if not accepts_keywords else []
+    if missing:
+        raise ValueError(
+            "Unsupported model architecture: backbone.forward must accept input_ids, attention_mask, position_ids, "
+            f"and use_cache; missing {missing}."
+        )
 
 
 def load_base_model(cfg: Any, tokenizer: Any, device: Any):
@@ -158,7 +201,9 @@ class SpanExtractor:
             span_start = ids.index(self.span_start_id)
             span_end = ids.index(self.span_end_id) + 1
         except ValueError as exc:
-            raise ValueError("Shared [SPAN] markers were not found in input_ids.") from exc
+            raise ValueError(
+                "Shared [SPAN] markers were not found in input_ids; truncation may have removed them."
+            ) from exc
 
         candidate_spans: list[tuple[int, int]] = []
         cursor = span_end
@@ -172,7 +217,7 @@ class SpanExtractor:
             cursor = item_end + 1
 
         if not candidate_spans:
-            raise ValueError("No [ITEM] candidate spans found.")
+            raise ValueError("No complete [ITEM] candidate spans found; truncation may have removed them.")
         return SpanInfo(span_start=span_start, span_end=span_end, candidate_spans=candidate_spans)
 
 
@@ -328,7 +373,10 @@ def build_batched_position_ids(input_ids: Any, attention_2d: Any, span_infos: li
 def validate_candidate_count(span_info: SpanInfo, expected: int) -> None:
     observed = len(span_info.candidate_spans)
     if observed != expected:
-        raise ValueError(f"Expected {expected} candidate spans, found {observed}.")
+        raise ValueError(
+            f"Tokenized prompt contains {observed} complete candidate spans, expected {expected}; truncation may have "
+            "removed candidate markers. Increase max_length or shorten the history/candidate text."
+        )
 
 
 class MeanLogProbListwiseScorer:
@@ -365,13 +413,20 @@ class MeanLogProbListwiseScorer:
     def parameters(self):
         return self.module.parameters()
 
-    def __call__(self, input_ids: Any, attention_mask: Any):
-        scores = self.score_batch(input_ids, attention_mask)
+    def __call__(self, input_ids: Any, attention_mask: Any, *, expected_candidates: int | None = None):
+        expected_counts = None if expected_candidates is None else [expected_candidates]
+        scores = self.score_batch(input_ids, attention_mask, expected_candidate_counts=expected_counts)
         if len(scores) != 1:
             raise ValueError("Use score_batch() when scoring more than one prompt.")
         return scores[0]
 
-    def score_batch(self, input_ids: Any, attention_mask: Any) -> list[Any]:
+    def score_batch(
+        self,
+        input_ids: Any,
+        attention_mask: Any,
+        *,
+        expected_candidate_counts: Sequence[int] | None = None,
+    ) -> list[Any]:
         """Score a padded batch with one backbone forward pass."""
         import torch
         import torch.nn.functional as functional
@@ -380,7 +435,18 @@ class MeanLogProbListwiseScorer:
             raise ValueError("input_ids and attention_mask must be two-dimensional batch tensors.")
         if input_ids.shape != attention_mask.shape:
             raise ValueError("input_ids and attention_mask must have matching shapes.")
-        span_infos = [self.span_extractor(input_ids[row]) for row in range(int(input_ids.shape[0]))]
+        batch_size = int(input_ids.shape[0])
+        if expected_candidate_counts is not None and len(expected_candidate_counts) != batch_size:
+            raise ValueError("expected_candidate_counts must contain one entry per batch row.")
+        span_infos = []
+        for row in range(batch_size):
+            try:
+                span_info = self.span_extractor(input_ids[row])
+                if expected_candidate_counts is not None:
+                    validate_candidate_count(span_info, expected_candidate_counts[row])
+            except ValueError as exc:
+                raise ValueError(f"Invalid tokenized prompt at batch row {row}: {exc}") from exc
+            span_infos.append(span_info)
         dtype = next(self.backbone.parameters()).dtype
         attention = build_batched_attention_mask(attention_mask, span_infos, self.cfg, dtype)
         position_ids = build_batched_position_ids(input_ids, attention_mask, span_infos, self.cfg)
@@ -390,7 +456,17 @@ class MeanLogProbListwiseScorer:
             position_ids=position_ids,
             use_cache=False,
         )
-        logits = outputs.logits[:, :-1, :]
+        logits = getattr(outputs, "logits", None)
+        if logits is None:
+            raise TypeError(
+                "Unsupported model architecture: backbone.forward must return an object with causal language-model "
+                "logits."
+            )
+        if logits.ndim != 3 or logits.shape[:2] != input_ids.shape:
+            raise ValueError(
+                "Unsupported model output: logits must have shape [batch, sequence_length, vocabulary_size]."
+            )
+        logits = logits[:, :-1, :]
         labels = input_ids[:, 1:]
         log_probabilities = functional.log_softmax(logits.float(), dim=-1)
         token_log_probabilities = torch.gather(
@@ -531,6 +607,7 @@ __all__ = [
     "resolve_dtype",
     "select_device",
     "validate_candidate_count",
+    "validate_model_architecture",
     "validate_special_tokens",
 ]
 
