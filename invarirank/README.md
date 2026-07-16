@@ -31,9 +31,11 @@ sample = {
 }
 ```
 
-A sample must contain at least one candidate. Candidate dictionaries are preserved in results. Order callbacks
-additionally require every candidate to have a unique non-empty ID under `item_id`, `id`, `asin`, or
-`movie_id`.
+A sample must contain at least one candidate. Candidate dictionaries are preserved in results. For
+`InvariRankReranker`, each candidate must have a non-empty `title` or `name`, and candidate IDs must be unique.
+IDs are read from `item_id`, `id`, `asin`, or `movie_id`; candidates without an explicit ID receive their original
+candidate index as a stable fallback. Order callbacks additionally require every candidate to have an explicit,
+unique, non-empty ID.
 
 The InvariRank architecture uses `user_id`, `history`, and recommendation item metadata. External callbacks may
 store domain-neutral context as an additional top-level field:
@@ -80,7 +82,8 @@ results = reranker.rank_many(
 )
 ```
 
-Every permutation must contain each original candidate index exactly once.
+Every permutation must contain each original candidate index exactly once, and indices must be integers (not strings,
+floats, or booleans). Invalid recommendation inputs and permutations are rejected before model inference.
 
 ## Configuration Serialization
 

@@ -376,6 +376,7 @@ class InvariRankReranker(Reranker):
         prepared: list[tuple[RankingSample, list[int], str]] = []
         for sample, permutation in requests:
             ranking_sample = sample if isinstance(sample, RankingSample) else RankingSample.from_dict(sample)
+            _validate_recommendation_sample(ranking_sample)
             resolved = _validate_permutation(permutation, len(ranking_sample.candidates))
             prompt = build_prompt(ranking_sample.to_dict(), resolved, self._legacy_config)
             prepared.append((ranking_sample, resolved, prompt))
@@ -536,10 +537,30 @@ def _package_version() -> str:
 
 
 def _validate_permutation(permutation: Sequence[int] | None, num_candidates: int) -> list[int]:
-    resolved = list(range(num_candidates)) if permutation is None else [int(index) for index in permutation]
+    resolved = list(range(num_candidates)) if permutation is None else list(permutation)
+    if any(isinstance(index, bool) or not isinstance(index, int) for index in resolved):
+        raise TypeError("permutation indices must be integers.")
     if len(resolved) != num_candidates or set(resolved) != set(range(num_candidates)):
         raise ValueError(f"permutation must contain every candidate index from 0 to {num_candidates - 1} exactly once.")
     return resolved
+
+
+def _validate_recommendation_sample(sample: RankingSample) -> None:
+    from .prompts import candidate_id
+
+    candidate_ids = [candidate_id(candidate, index) for index, candidate in enumerate(sample.candidates)]
+    indices_by_id: dict[str, list[int]] = {}
+    for index, item_id in enumerate(candidate_ids):
+        indices_by_id.setdefault(item_id, []).append(index)
+    duplicates = {item_id: indices for item_id, indices in indices_by_id.items() if len(indices) > 1}
+    if duplicates:
+        details = ", ".join(f"{item_id!r} at indices {indices}" for item_id, indices in duplicates.items())
+        raise ValueError(f"Candidate item IDs must be unique; duplicate IDs: {details}.")
+
+    for index, candidate in enumerate(sample.candidates):
+        title = candidate.get("title", candidate.get("name", ""))
+        if title is None or not str(title).strip():
+            raise ValueError(f"Candidate at index {index} must have a non-empty title or name.")
 
 
 def _normalize_rank_requests(

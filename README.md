@@ -71,6 +71,9 @@ sample = {
 }
 ```
 
+Each InvariRank candidate must have a non-empty `title` (or `name`) and a unique ID. IDs may use `item_id`, `id`,
+`asin`, or `movie_id`; when omitted, the candidate's original index is used as a fallback.
+
 A conventional listwise LLM reranker can change its output when the candidates are serialized in a different order:
 
 ```python
