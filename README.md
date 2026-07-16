@@ -113,6 +113,7 @@ for item in result.items:
 invarirank/
 ├── __init__.py          public framework API
 ├── framework.py         ranking contracts, configuration, and reranker facade
+├── permutations.py      external adapters and controlled permutation experiments
 ├── modeling.py          model loading, span scoring, masks, and position IDs
 ├── prompts.py           marker-based InvariRank prompt construction
 └── training.py          datasets, losses, validation, LoRA, and checkpoints
@@ -228,6 +229,33 @@ result = reranker.rank(sample, permutation=[2, 0, 1])
 ```
 
 The returned `RankingResult` records both the final ranking and the input permutation used to produce it.
+
+Rank multiple candidate sets in padded model-forward batches:
+
+```python
+results = reranker.rank_many(samples, batch_size=8)
+```
+
+Use one optional permutation per sample when controlled input orders are already available:
+
+```python
+results = reranker.rank_many(samples, permutations=permutations, batch_size=8)
+```
+
+### Permutation Experiments
+
+`PermutationSuite` runs domain-neutral controlled input-order experiments with InvariRank or another reranker:
+
+```python
+from invarirank import PermutationSuite
+
+suite = PermutationSuite(reranker)
+results = suite.random(sample, count=6, seed=42, batch_size=8)
+```
+
+The suite also provides `fixed(...)`, `sweep(...)`, and `templates(...)`. Results retain original candidate indices,
+item IDs, input positions, scores, and exact permutations. See [`invarirank/README.md`](invarirank/README.md) for
+external score and generated-order callback examples.
 
 ### Framework Training
 
@@ -533,6 +561,7 @@ raw MovieLens or Amazon Books interactions
 The separation of responsibilities is:
 
 - `invarirank/framework.py`: public data contracts and reranker facade.
+- `invarirank/permutations.py`: callable external adapters and controlled permutation experiments.
 - `invarirank/prompts.py`: framework-owned marker prompt.
 - `invarirank/modeling.py`: span extraction, structured attention, shared position IDs, and scoring.
 - `invarirank/training.py`: framework training and checkpointing.
