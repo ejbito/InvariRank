@@ -117,14 +117,21 @@ python -m ruff format --check invarirank
 ## Citation
 
 ```bibtex
-@misc{bito2026passorderpositioninvariantlistwise,
-  title={One Pass, Any Order: Position-Invariant Listwise Reranking for LLM-Based Recommendation},
-  author={Ethan Bito and Yongli Ren and Estrid He},
-  year={2026},
-  eprint={2604.27599},
-  archivePrefix={arXiv},
-  primaryClass={cs.IR},
-  url={https://arxiv.org/abs/2604.27599}
+@inproceedings{10.1145/3805712.3809952,
+author = {Bito, Ethan and Ren, Yongli and He, Estrid},
+title = {One Pass, Any Order: Position-Invariant Listwise Reranking for LLM-Based Recommendation},
+year = {2026},
+isbn = {9798400725999},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3805712.3809952},
+doi = {10.1145/3805712.3809952},
+booktitle = {Proceedings of the 49th International ACM SIGIR Conference on Research and Development in Information Retrieval},
+pages = {3625–3629},
+numpages = {5},
+keywords = {recommender systems, large language models, listwise ranking, permutation invariance, position bias},
+location = {Australia},
+series = {SIGIR '26}
 }
 ```
 
