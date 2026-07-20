@@ -85,11 +85,28 @@ def _rank_many(
     requests: Sequence[tuple[RankingSample, Sequence[int]]],
     *,
     batch_size: int,
+    progress_description: str | None = None,
 ) -> list[RankingResult]:
     batched = getattr(reranker, "rank_many", None)
-    if callable(batched) and batch_size > 1:
-        return list(batched(requests, batch_size=batch_size))
-    return [reranker.rank(sample, permutation=permutation) for sample, permutation in requests]
+    if progress_description is None:
+        if callable(batched) and batch_size > 1:
+            return list(batched(requests, batch_size=batch_size))
+        return [reranker.rank(sample, permutation=permutation) for sample, permutation in requests]
+
+    from tqdm.auto import tqdm
+
+    results = []
+    with tqdm(total=len(requests), desc=progress_description, unit="ranking", dynamic_ncols=True) as progress:
+        if callable(batched) and batch_size > 1:
+            for start in range(0, len(requests), batch_size):
+                chunk = requests[start : start + batch_size]
+                results.extend(batched(chunk, batch_size=batch_size))
+                progress.update(len(chunk))
+        else:
+            for sample, permutation in requests:
+                results.append(reranker.rank(sample, permutation=permutation))
+                progress.update()
+    return results
 
 
 def borda_aggregate(
@@ -326,8 +343,7 @@ class StellaCalibrator:
             )
             for key, value in expected.items()
             if value is not None
-            and (self.provenance.get(key, False) if key == "top_one_generation" else self.provenance.get(key))
-            != value
+            and (self.provenance.get(key, False) if key == "top_one_generation" else self.provenance.get(key)) != value
         }
         if mismatches:
             details = ", ".join(
@@ -489,7 +505,12 @@ def fit_stella_calibrator(
                 permutation = others[:true_position] + [ground_truth] + others[true_position:]
                 probe_requests.append((ranking_sample, permutation))
                 true_positions.append(true_position)
-    probe_results = _rank_many(reranker, probe_requests, batch_size=batch_size)
+    probe_results = _rank_many(
+        reranker,
+        probe_requests,
+        batch_size=batch_size,
+        progress_description="[STELLA] Calibration",
+    )
     for true_position, (_, permutation), result in zip(true_positions, probe_requests, probe_results):
         predicted_position = permutation.index(result.items[0].candidate_index)
         observations.append((true_position, predicted_position))

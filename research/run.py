@@ -280,6 +280,7 @@ def rank(
     if isinstance(dataset_values, Mapping):
         method_options.setdefault("dataset", dataset_values.get("name"))
     resolved_backend = resolve_output_backend(method, values, method_options)
+    print(f"[Ranking] Loading {method} ({resolved_backend}) with {selected_model}...", flush=True)
     if method == "stella" and not method_options.get("transition_matrix_path"):
         probe_path = method_options.get("probe_path")
         if not probe_path:
@@ -296,6 +297,7 @@ def rank(
             method_options,
             backend=resolved_backend,
         )
+        print("[STELLA] Fitting the position-transition calibrator...", flush=True)
         calibrator = fit_stella_calibrator(
             base,
             probe_samples,
@@ -326,32 +328,51 @@ def rank(
         )
     else:
         reranker = load_backbone_method(method, selected_model, values, method_options)
-    permutation_count = int(permutations or values.get("eval_num_permutations", 1))
+    configured_permutations = permutations if permutations is not None else values.get("eval_num_permutations", 1)
+    permutation_count = int(configured_permutations)
+    if permutation_count < 1:
+        raise ValueError("permutations must be at least one.")
     seed = int(values.get("seed", 0))
     records = []
-    for sample_index, sample in enumerate(samples):
-        candidate_count = len(sample.get("candidates", []))
-        if candidate_count == 0:
-            continue
-        permutation_records = []
-        for permutation_index in range(permutation_count):
-            permutation = deterministic_permutation(candidate_count, sample_index, permutation_index, seed)
-            result = reranker.rank(sample, permutation=permutation)
-            permutation_records.append(result_permutation_record(result, permutation_index))
-        records.append(
-            {
-                "sample_index": sample_index,
-                "method": method,
-                "backend": resolved_backend,
-                "user_id": sample.get("user_id"),
-                "split": sample.get("split", "test"),
-                "list_length": int(sample.get("list_length", candidate_count)),
-                "num_items": candidate_count,
-                "history": sample.get("history", []),
-                "candidates": sample["candidates"],
-                "permutations": permutation_records,
-            }
-        )
+    eligible_samples = sum(bool(sample.get("candidates")) for sample in samples)
+    total_rankings = eligible_samples * permutation_count
+    print(
+        f"[Ranking] Ready: {eligible_samples} samples x {permutation_count} permutations = "
+        f"{total_rankings} outer rankings.",
+        flush=True,
+    )
+    from tqdm.auto import tqdm
+
+    with tqdm(total=total_rankings, desc=f"[Ranking] {method}", unit="ranking", dynamic_ncols=True) as progress:
+        for sample_index, sample in enumerate(samples):
+            candidate_count = len(sample.get("candidates", []))
+            if candidate_count == 0:
+                continue
+            permutation_records = []
+            for permutation_index in range(permutation_count):
+                progress.set_postfix(
+                    user=f"{sample_index + 1}/{len(samples)}",
+                    permutation=f"{permutation_index + 1}/{permutation_count}",
+                    refresh=True,
+                )
+                permutation = deterministic_permutation(candidate_count, sample_index, permutation_index, seed)
+                result = reranker.rank(sample, permutation=permutation)
+                permutation_records.append(result_permutation_record(result, permutation_index))
+                progress.update()
+            records.append(
+                {
+                    "sample_index": sample_index,
+                    "method": method,
+                    "backend": resolved_backend,
+                    "user_id": sample.get("user_id"),
+                    "split": sample.get("split", "test"),
+                    "list_length": int(sample.get("list_length", candidate_count)),
+                    "num_items": candidate_count,
+                    "history": sample.get("history", []),
+                    "candidates": sample["candidates"],
+                    "permutations": permutation_records,
+                }
+            )
     output = method_options.get("ranked_lists_path") or method_options.get("output_path")
     if not output and method_options.get("output_dir"):
         output = str(Path(method_options["output_dir"]) / "ranked_lists.json")
@@ -361,6 +382,7 @@ def rank(
         output_dir = values.get("output_dir", ROOT / "runs" / "eval" / method)
         output = str(Path(output_dir) / "ranked_lists.json")
     write_json(records, output)
+    print(f"[Ranking] Saved {len(records)} records to {output}", flush=True)
     return records
 
 
@@ -393,7 +415,11 @@ def evaluate_records(
         records = [json.loads(line) for line in text.splitlines() if line.strip()]
     if isinstance(records, dict):
         records = [records]
-    report = evaluate(records, top_k=tuple(top_k or values.get("top_k", [5, 10])))
+    report = evaluate(
+        records,
+        top_k=tuple(top_k or values.get("top_k", [5, 10])),
+        show_progress=True,
+    )
     report["ranked_lists_path"] = str(source)
     report["efficiency"] = aggregate_efficiency(records)
     report["generation"] = aggregate_generation_validity(records)

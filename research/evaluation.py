@@ -383,6 +383,7 @@ def evaluate(
     results: Sequence[RankingResult] | Sequence[dict[str, Any]],
     *,
     top_k: Sequence[int] = (5, 10),
+    show_progress: bool = False,
 ) -> dict[str, Any]:
     values = list(results)
     if values and isinstance(values[0], RankingResult):
@@ -393,7 +394,12 @@ def evaluate(
     effectiveness: list[dict[str, float]] = []
     robustness: list[dict[str, float]] = []
     validity: list[dict[str, float]] = []
-    for record in records:
+    record_iterator: Any = records
+    if show_progress:
+        from tqdm.auto import tqdm
+
+        record_iterator = tqdm(records, desc="[Evaluation] Records", unit="record", dynamic_ncols=True)
+    for record in record_iterator:
         effectiveness.extend(
             metrics
             for permutation in record.get("permutations", [])
