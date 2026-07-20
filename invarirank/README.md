@@ -1,5 +1,7 @@
 # InvariRank Framework Guide
 
+[Repository overview](../README.md) | [Research guide](../research/README.md)
+
 The `invarirank` package provides two active capabilities:
 
 1. Recommendation-specific InvariRank inference and training.
@@ -11,6 +13,20 @@ evidence; it does not calculate position-bias, effectiveness, or paper-specific 
 The published wheel contains this reusable package only. Dataset preparation, paper baselines, evaluation, experiment
 configs, and reproduction commands under `research/` are available from a repository checkout with the `research`
 dependency extra installed; they are not imported or installed by the core wheel.
+
+## Installation
+
+From a repository checkout, install the core framework with Python 3.10 or newer:
+
+```bash
+pip install -e .
+```
+
+Add training dependencies only when fine-tuning or loading PEFT adapters:
+
+```bash
+pip install -e ".[train]"
+```
 
 ## Ranking Data Contract
 
@@ -414,6 +430,34 @@ The suite rejects:
 - Score rows with the wrong length, non-numeric values, `NaN`, or infinity.
 - Batch callbacks returning the wrong number of rows.
 - Order callbacks with absent input IDs or unknown, duplicate, or missing output IDs.
+
+## Architecture
+
+The recommendation-specific path is:
+
+```text
+RankingSample
+  -> fixed marker-based recommendation prompt
+  -> tokenizer and candidate-span extraction
+  -> decoder-only causal language model
+  -> block candidate attention
+  -> shared candidate position IDs
+  -> marker-span mean log probabilities
+  -> RankingResult
+```
+
+Responsibilities remain deliberately small:
+
+| Module | Responsibility |
+| --- | --- |
+| `framework.py` | Public ranking contracts, configuration, reranker, and model lifecycle |
+| `permutations.py` | Domain-neutral callable adapters and controlled input-order experiments |
+| `prompts.py` | Recommendation prompt and structural marker formatting |
+| `modeling.py` | Model loading, span extraction, attention, position IDs, and scoring |
+| `training.py` | LambdaRank, optional permutation consistency, LoRA, validation, and checkpoints |
+
+Candidate retrieval, paper baselines, generated-output prompts, paper metrics, and reproduction orchestration are not
+framework responsibilities; they are documented in the [research guide](../research/README.md).
 
 ## Metrics and Persistence Boundary
 
