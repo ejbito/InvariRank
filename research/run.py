@@ -318,13 +318,22 @@ def rank(
         matrix_output = method_options.get("transition_matrix_output")
         if matrix_output:
             calibrator.save(matrix_output)
+        diagnostics = calibrator.diagnostics
+        print(
+            "[STELLA] Calibration ready: "
+            f"{diagnostics.get('total_observations', 0)} observations, "
+            f"mean normalized row entropy={diagnostics.get('mean_normalized_row_entropy', 0.0):.4f}, "
+            f"mean pairwise TV={diagnostics.get('mean_pairwise_total_variation', 0.0):.4f}.",
+            flush=True,
+        )
         reranker = Stella(
             base,
             calibrator,
             max_updates=int(method_options.get("max_updates", 10)),
-            aggregate_count=int(method_options.get("aggregate_count", 3)),
             seed=int(method_options.get("seed", 42)),
-            batch_size=int(method_options.get("batch_size", 1)),
+            convergence_tolerance=float(method_options.get("convergence_tolerance", 1e-6)),
+            convergence_steps=int(method_options.get("convergence_steps", 3)),
+            minimum_information_gain=float(method_options.get("minimum_information_gain", 1e-6)),
         )
     else:
         reranker = load_backbone_method(method, selected_model, values, method_options)

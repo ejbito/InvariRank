@@ -193,12 +193,24 @@ methods:
     ensemble_steps: 5
     smoothing: 1.0
     max_updates: 10
-    aggregate_count: 3
+    convergence_tolerance: 0.000001
+    convergence_steps: 3
+    minimum_information_gain: 0.000001
     transition_matrix_output: runs/eval/stella_movielens/transition_matrix.json
 ```
 
 Set `transition_matrix_path` to the saved matrix on later runs to skip calibration. The matrix provenance is tied to
-the model, backend, prompt version, dataset, and candidate count; incompatible reuse is rejected.
+the model, backend, prompt version, dataset, and candidate count; incompatible reuse is rejected. Calibration treats
+every relevant candidate in a probing sample as a target, so candidate lists with multiple positives remain valid.
+The saved matrix also includes observation counts, row entropy, row similarity, and probability-range diagnostics.
+
+At inference, STELLA updates its candidate posterior until entropy converges or `max_updates` is reached, then returns
+the complete ranking induced by the single minimum-entropy posterior. Consensus across the raw internal rankings
+breaks posterior ties. If the selected posterior has no meaningful information gain over a uniform distribution,
+STELLA falls back to the corresponding raw model ranking instead of copying the outer input order. Result metadata
+records the selected entropy and update, information gain, fallback status, diagnostics, and actual model-call count.
+`batch_size` applies to the independent probing requests; inference updates remain sequential so convergence can stop
+model calls early.
 
 ## Stage 4: evaluation
 

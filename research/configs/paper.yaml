@@ -61,7 +61,9 @@ methods:
     ensemble_steps: 5
     smoothing: 1.0
     max_updates: 10
-    aggregate_count: 3
+    convergence_tolerance: 0.000001
+    convergence_steps: 3
+    minimum_information_gain: 0.000001
     transition_matrix_output: runs/eval/stella_movielens/transition_matrix.json
     output_dir: runs/eval/stella_movielens
     seed: 42

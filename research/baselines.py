@@ -27,6 +27,7 @@ DUAL_BACKEND_METHODS = {"zero_shot", "bootstrapping", "sgs", "stella"}
 SPAN_ONLY_METHODS = set(FINE_TUNED_METHODS)
 OUTPUT_BACKENDS = {"generate", "span_logprob"}
 SUPPORTED_METHODS = frozenset(DUAL_BACKEND_METHODS | SPAN_ONLY_METHODS)
+STELLA_CALIBRATION_VERSION = "stella-listwise-multirelevant-v2"
 
 
 def _sample(sample: RankingSample | Mapping[str, Any]) -> RankingSample:
@@ -78,6 +79,28 @@ def _combined_backend_metadata(rankings: Sequence[RankingResult]) -> dict[str, A
             }
         )
     return combined
+
+
+def _transition_matrix_diagnostics(matrix: np.ndarray) -> dict[str, Any]:
+    size = int(matrix.shape[0])
+    row_entropies = [float(-sum(value * math.log(value) for value in row if value > 0)) for row in matrix]
+    pairwise_total_variation = [
+        float(0.5 * np.abs(matrix[left] - matrix[right]).sum())
+        for left in range(size - 1)
+        for right in range(left + 1, size)
+    ]
+    maximum_entropy = math.log(size) if size > 1 else 0.0
+    return {
+        "row_entropies": row_entropies,
+        "mean_row_entropy": float(np.mean(row_entropies)),
+        "mean_normalized_row_entropy": (float(np.mean(row_entropies) / maximum_entropy) if maximum_entropy else 0.0),
+        "mean_pairwise_total_variation": (
+            float(np.mean(pairwise_total_variation)) if pairwise_total_variation else 0.0
+        ),
+        "max_pairwise_total_variation": (float(max(pairwise_total_variation)) if pairwise_total_variation else 0.0),
+        "minimum_probability": float(matrix.min()),
+        "maximum_probability": float(matrix.max()),
+    }
 
 
 def _rank_many(
@@ -286,7 +309,13 @@ class StochasticGreedySelection(Reranker):
 class StellaCalibrator:
     """Position transition likelihoods for STELLA Bayesian calibration."""
 
-    def __init__(self, transition_matrix: Any, *, provenance: Mapping[str, Any] | None = None):
+    def __init__(
+        self,
+        transition_matrix: Any,
+        *,
+        provenance: Mapping[str, Any] | None = None,
+        diagnostics: Mapping[str, Any] | None = None,
+    ):
         matrix = np.asarray(transition_matrix, dtype=np.float64)
         if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1] or matrix.shape[0] < 1:
             raise ValueError("STELLA transition matrix must be a non-empty square matrix.")
@@ -297,6 +326,10 @@ class StellaCalibrator:
             raise ValueError("Every STELLA transition-matrix row must have positive mass.")
         self.transition_matrix = matrix / row_sums
         self.provenance = dict(provenance or {})
+        self.diagnostics = {
+            **_transition_matrix_diagnostics(self.transition_matrix),
+            **dict(diagnostics or {}),
+        }
 
     @property
     def size(self) -> int:
@@ -314,11 +347,21 @@ class StellaCalibrator:
         if size < 1 or smoothing < 0:
             raise ValueError("size must be positive and smoothing must be non-negative.")
         counts = np.full((size, size), float(smoothing), dtype=np.float64)
+        observations_per_true_position = np.zeros(size, dtype=np.int64)
         for true_position, predicted_position in observations:
             if not 0 <= true_position < size or not 0 <= predicted_position < size:
                 raise ValueError("STELLA observation position is outside the matrix.")
             counts[true_position, predicted_position] += 1.0
-        return cls(counts, provenance=provenance)
+            observations_per_true_position[true_position] += 1
+        return cls(
+            counts,
+            provenance=provenance,
+            diagnostics={
+                "observations_per_true_position": observations_per_true_position.tolist(),
+                "total_observations": int(observations_per_true_position.sum()),
+                "smoothing": float(smoothing),
+            },
+        )
 
     @classmethod
     def load(cls, path: str | Path) -> StellaCalibrator:
@@ -328,7 +371,11 @@ class StellaCalibrator:
         with path.open("r", encoding="utf-8") as handle:
             value = json.load(handle)
         if isinstance(value, dict):
-            return cls(value.get("transition_matrix", value), provenance=value.get("provenance"))
+            return cls(
+                value.get("transition_matrix", value),
+                provenance=value.get("provenance"),
+                diagnostics=value.get("diagnostics"),
+            )
         return cls(value)
 
     def save(self, path: str | Path) -> None:
@@ -336,7 +383,11 @@ class StellaCalibrator:
         destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("w", encoding="utf-8") as handle:
             json.dump(
-                {"transition_matrix": self.transition_matrix.tolist(), "provenance": self.provenance},
+                {
+                    "transition_matrix": self.transition_matrix.tolist(),
+                    "provenance": self.provenance,
+                    "diagnostics": self.diagnostics,
+                },
                 handle,
                 indent=2,
             )
@@ -370,7 +421,7 @@ class StellaCalibrator:
 
 
 class Stella(Reranker):
-    """Bayesian position calibration with low-entropy Borda aggregation."""
+    """Listwise STELLA using the minimum-entropy Bayesian posterior."""
 
     def __init__(
         self,
@@ -378,24 +429,22 @@ class Stella(Reranker):
         calibrator: StellaCalibrator,
         *,
         max_updates: int = 10,
-        aggregate_count: int = 3,
         seed: int = 42,
         convergence_tolerance: float = 1e-6,
         convergence_steps: int = 3,
-        batch_size: int = 1,
+        minimum_information_gain: float = 1e-6,
     ):
-        if max_updates < 1 or aggregate_count < 1 or convergence_steps < 1 or batch_size < 1:
-            raise ValueError("STELLA update, aggregation, and convergence counts must be positive.")
-        if aggregate_count > max_updates:
-            raise ValueError("STELLA aggregate_count cannot exceed max_updates.")
+        if max_updates < 1 or convergence_steps < 1:
+            raise ValueError("STELLA update and convergence counts must be positive.")
+        if convergence_tolerance < 0 or minimum_information_gain < 0:
+            raise ValueError("STELLA convergence and information-gain tolerances must be non-negative.")
         self.reranker = reranker
         self.calibrator = calibrator
         self.max_updates = max_updates
-        self.aggregate_count = aggregate_count
         self.seed = seed
         self.convergence_tolerance = convergence_tolerance
         self.convergence_steps = convergence_steps
-        self.batch_size = batch_size
+        self.minimum_information_gain = minimum_information_gain
 
     def rank(
         self,
@@ -409,22 +458,15 @@ class Stella(Reranker):
             raise ValueError(f"STELLA matrix size {self.calibrator.size} does not match candidate count {count}.")
         outer = _permutation(permutation, count)
         candidate_prior = np.full(count, 1.0 / count)
-        entropy_rankings: list[tuple[float, RankingResult]] = []
+        posterior_records: list[tuple[float, int, RankingResult, RankingResult, float]] = []
         raw_rankings: list[RankingResult] = []
         previous_entropy = None
         stable_steps = 0
-        update_permutations = []
         for update_index in range(self.max_updates):
             current = list(outer)
             if update_index:
                 random.Random(self.seed + update_index * 1009).shuffle(current)
-            update_permutations.append(current)
-        generated_rankings = _rank_many(
-            self.reranker,
-            [(ranking_sample, current) for current in update_permutations],
-            batch_size=self.batch_size,
-        )
-        for current, raw_result in zip(update_permutations, generated_rankings):
+            raw_result = self.reranker.rank(ranking_sample, permutation=current)
             raw_rankings.append(raw_result)
             predicted_candidate = raw_result.items[0].candidate_index
             predicted_position = current.index(predicted_candidate)
@@ -433,7 +475,12 @@ class Stella(Reranker):
             for position, candidate_index in enumerate(current):
                 candidate_prior[candidate_index] = position_posterior[position]
             entropy = float(-sum(value * math.log(value) for value in candidate_prior if value > 0))
-            posterior_order = sorted(range(count), key=lambda index: (-candidate_prior[index], outer.index(index)))
+            information_gain = float(math.log(count) - entropy)
+            raw_positions = {item.candidate_index: rank for rank, item in enumerate(raw_result.items)}
+            posterior_order = sorted(
+                range(count),
+                key=lambda index: (-candidate_prior[index], raw_positions[index], outer.index(index)),
+            )
             posterior_result = _probability_result(
                 ranking_sample,
                 outer,
@@ -441,33 +488,60 @@ class Stella(Reranker):
                 candidate_prior,
                 entropy,
             )
-            entropy_rankings.append((entropy, posterior_result))
+            posterior_records.append((entropy, update_index, posterior_result, raw_result, information_gain))
             if previous_entropy is not None and abs(previous_entropy - entropy) <= self.convergence_tolerance:
                 stable_steps += 1
             else:
                 stable_steps = 0
             previous_entropy = entropy
-            if stable_steps >= self.convergence_steps and len(entropy_rankings) >= self.aggregate_count:
+            if stable_steps >= self.convergence_steps:
                 break
 
-        selected = sorted(entropy_rankings, key=lambda value: value[0])[: self.aggregate_count]
-        output = borda_aggregate(
-            ranking_sample,
-            [result for _, result in selected],
-            outer,
-            method="stella",
-            forward_passes=len(entropy_rankings),
+        selected_entropy, selected_update, posterior_result, raw_result, information_gain = min(
+            posterior_records,
+            key=lambda value: (value[0], value[1]),
         )
+        use_fallback = information_gain <= self.minimum_information_gain
+        if not use_fallback:
+            posterior_scores = {item.candidate_index: item.score for item in posterior_result.items}
+            raw_consensus = {index: 0.0 for index in range(count)}
+            for ranking in raw_rankings:
+                for rank, item in enumerate(ranking.items):
+                    raw_consensus[item.candidate_index] += count - rank
+            selected_raw_positions = {item.candidate_index: rank for rank, item in enumerate(raw_result.items)}
+            posterior_order = sorted(
+                range(count),
+                key=lambda index: (
+                    -posterior_scores[index],
+                    -raw_consensus[index],
+                    selected_raw_positions[index],
+                    outer.index(index),
+                ),
+            )
+            posterior_result = _probability_result(
+                ranking_sample,
+                outer,
+                posterior_order,
+                posterior_scores,
+                selected_entropy,
+            )
+        output = _rebase_ranking_result(ranking_sample, raw_result, outer) if use_fallback else posterior_result
         return RankingResult(
             user_id=output.user_id,
             items=output.items,
             permutation=output.permutation,
             split=output.split,
             metadata={
-                **output.metadata,
-                "bayesian_updates": len(entropy_rankings),
-                "selected_entropies": [entropy for entropy, _ in selected],
-                "aggregate_count": len(selected),
+                "method": "stella",
+                "forward_passes": len(raw_rankings),
+                "bayesian_updates": len(raw_rankings),
+                "aggregation": "minimum_entropy_posterior",
+                "selected_entropy": selected_entropy,
+                "selected_update": selected_update,
+                "posterior_information_gain": information_gain,
+                "posterior_fallback": use_fallback,
+                "fallback_reason": "uninformative_posterior" if use_fallback else None,
+                "transition_diagnostics": dict(self.calibrator.diagnostics),
                 **_combined_backend_metadata(raw_rankings),
             },
         )
@@ -500,17 +574,22 @@ def fit_stella_calibrator(
         ranking_sample = _sample(raw_sample)
         if len(ranking_sample.candidates) != size:
             raise ValueError("STELLA probing samples must have a fixed candidate count.")
-        relevance = [int(candidate.get("relevance", 0)) for candidate in ranking_sample.candidates]
-        if max(relevance) <= 0:
+        relevant_candidates = [
+            index for index, candidate in enumerate(ranking_sample.candidates) if int(candidate.get("relevance", 0)) > 0
+        ]
+        if not relevant_candidates:
             raise ValueError("Every STELLA probing sample must contain a relevant candidate.")
-        ground_truth = max(range(size), key=lambda index: (relevance[index], -index))
-        for true_position in range(size):
-            for ensemble_index in range(ensemble_steps):
-                others = [index for index in range(size) if index != ground_truth]
-                random.Random(seed + sample_index * 100_003 + true_position * 1009 + ensemble_index).shuffle(others)
-                permutation = others[:true_position] + [ground_truth] + others[true_position:]
-                probe_requests.append((ranking_sample, permutation))
-                true_positions.append(true_position)
+        for target_index, target_candidate in enumerate(relevant_candidates):
+            for true_position in range(size):
+                for ensemble_index in range(ensemble_steps):
+                    others = [index for index in range(size) if index != target_candidate]
+                    local_seed = (
+                        seed + sample_index * 1_000_003 + target_index * 100_003 + true_position * 1009 + ensemble_index
+                    )
+                    random.Random(local_seed).shuffle(others)
+                    permutation = others[:true_position] + [target_candidate] + others[true_position:]
+                    probe_requests.append((ranking_sample, permutation))
+                    true_positions.append(true_position)
     probe_results = _rank_many(
         reranker,
         probe_requests,
@@ -522,12 +601,23 @@ def fit_stella_calibrator(
         observations.append((true_position, predicted_position))
     resolved_provenance = dict(provenance or {})
     resolved_provenance.setdefault("candidate_count", size)
-    return StellaCalibrator.fit(
+    calibrator = StellaCalibrator.fit(
         observations,
         size=size,
         smoothing=smoothing,
         provenance=resolved_provenance,
     )
+    calibrator.diagnostics.update(
+        {
+            "probe_samples": len(selected_samples),
+            "relevant_targets": sum(
+                sum(int(candidate.get("relevance", 0)) > 0 for candidate in _sample(sample).candidates)
+                for sample in selected_samples
+            ),
+            "ensemble_steps": ensemble_steps,
+        }
+    )
+    return calibrator
 
 
 def load_backbone_method(
@@ -564,9 +654,10 @@ def load_backbone_method(
             base,
             calibrator,
             max_updates=int(options.get("max_updates", 10)),
-            aggregate_count=int(options.get("aggregate_count", 3)),
             seed=int(options.get("seed", 42)),
-            batch_size=int(options.get("batch_size", 1)),
+            convergence_tolerance=float(options.get("convergence_tolerance", 1e-6)),
+            convergence_steps=int(options.get("convergence_steps", 3)),
+            minimum_information_gain=float(options.get("minimum_information_gain", 1e-6)),
         )
     raise AssertionError("unreachable")
 
@@ -650,6 +741,7 @@ def stella_provenance(
     prompt, prompt_version = output_prompt_identity(name, backend, options)
     dataset = options.get("dataset", values.get("dataset"))
     provenance = {
+        "calibration_version": STELLA_CALIBRATION_VERSION,
         "model_name": model_name,
         "output_backend": backend,
         "prompt_family": prompt,
@@ -701,6 +793,30 @@ def _probability_result(
         permutation=tuple(input_permutation),
         split=sample.split,
         metadata={"entropy": entropy},
+    )
+
+
+def _rebase_ranking_result(
+    sample: RankingSample,
+    result: RankingResult,
+    input_permutation: Sequence[int],
+) -> RankingResult:
+    input_positions = {candidate: position for position, candidate in enumerate(input_permutation)}
+    return RankingResult(
+        user_id=sample.user_id,
+        items=tuple(
+            RankedItem(
+                candidate_index=item.candidate_index,
+                item_id=_candidate_id(sample.candidates[item.candidate_index], item.candidate_index),
+                score=item.score,
+                input_position=input_positions[item.candidate_index],
+                relevance=_relevance(sample.candidates[item.candidate_index]),
+                candidate=dict(sample.candidates[item.candidate_index]),
+            )
+            for item in result.items
+        ),
+        permutation=tuple(input_permutation),
+        split=sample.split,
     )
 
 
