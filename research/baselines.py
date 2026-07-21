@@ -210,17 +210,19 @@ class Bootstrapping(Reranker):
         )
 
 
-class SequentialGreedySelection(Reranker):
-    """Greedily select the best remaining candidates over repeated model calls.
+class StochasticGreedySelection(Reranker):
+    """Stochastically select the best remaining candidates over repeated model calls.
 
-    Each pass chooses ``selection_size`` candidates before reranking the remainder.
+    Each pass chooses ``selection_size`` candidates, removes them, and shuffles the
+    remaining candidates before the next selection round.
     """
 
-    def __init__(self, reranker: Reranker, *, selection_size: int = 1):
+    def __init__(self, reranker: Reranker, *, selection_size: int = 1, seed: int = 42):
         if selection_size < 1:
             raise ValueError("selection_size must be at least one.")
         self.reranker = reranker
         self.selection_size = selection_size
+        self.seed = seed
 
     def rank(
         self,
@@ -234,6 +236,7 @@ class SequentialGreedySelection(Reranker):
         selected: list[int] = []
         local_rankings: list[RankingResult] = []
         forward_passes = 0
+        generator = random.Random(self.seed)
         while remaining:
             local_sample = RankingSample(
                 user_id=ranking_sample.user_id,
@@ -249,6 +252,7 @@ class SequentialGreedySelection(Reranker):
             selected.extend(chosen_global)
             chosen_set = set(chosen_global)
             remaining = [index for index in remaining if index not in chosen_set]
+            generator.shuffle(remaining)
 
         input_positions = {candidate: position for position, candidate in enumerate(outer)}
         count = len(selected)
@@ -272,6 +276,8 @@ class SequentialGreedySelection(Reranker):
                 "method": "sgs",
                 "forward_passes": forward_passes,
                 "selection_size": self.selection_size,
+                "shuffle_remaining": True,
+                "seed": self.seed,
                 **_combined_backend_metadata(local_rankings),
             },
         )
@@ -547,7 +553,11 @@ def load_backbone_method(
     if name == "bootstrapping":
         return Bootstrapping(base, num_samples=int(options.get("num_samples", 3)), seed=int(options.get("seed", 42)))
     if name == "sgs":
-        return SequentialGreedySelection(base, selection_size=int(options.get("selection_size", 1)))
+        return StochasticGreedySelection(
+            base,
+            selection_size=int(options.get("selection_size", 1)),
+            seed=int(options.get("seed", 42)),
+        )
     if name == "stella":
         assert calibrator is not None
         return Stella(
@@ -706,6 +716,10 @@ def _relevance(candidate: Mapping[str, Any]) -> int | None:
     return None if value is None else int(value)
 
 
+# Backward-compatible import for code written against the earlier incorrect name.
+SequentialGreedySelection = StochasticGreedySelection
+
+
 __all__ = [
     "DUAL_BACKEND_METHODS",
     "SUPPORTED_METHODS",
@@ -714,6 +728,7 @@ __all__ = [
     "Bootstrapping",
     "DirectMethod",
     "SequentialGreedySelection",
+    "StochasticGreedySelection",
     "Stella",
     "StellaCalibrator",
     "borda_aggregate",

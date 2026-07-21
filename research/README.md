@@ -167,6 +167,8 @@ rankings, relevance, generation metadata, and efficiency data.
 
 Zero-shot, Bootstrapping, SGS, and STELLA also support the marker-span `span_logprob` backend for controlled research
 comparisons. LFT and InvariRank remain `span_logprob` only because their checkpoints are trained against that score.
+SGS removes the candidates selected in each round and reproducibly shuffles the remaining candidates using its
+configured `seed` before the next model call.
 
 The CLI reports model-loading status followed by completed `user x permutation` rankings, elapsed time, throughput,
 and ETA. STELLA reports calibration separately. An outer Bootstrapping, SGS, or STELLA ranking contains multiple model

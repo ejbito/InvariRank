@@ -50,6 +50,7 @@ methods:
   sgs:
     backend: generate
     selection_size: 1
+    seed: 42
     output_dir: runs/eval/sgs_movielens
   stella:
     backend: generate
