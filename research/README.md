@@ -41,7 +41,7 @@ raw interactions
   -> LightGCN retrieval and candidate lists
   -> baseline inference or LFT/InvariRank training
   -> ranking under controlled input permutations
-  -> effectiveness, robustness, validity, and efficiency metrics
+  -> effectiveness, preference validity, listwise stability, position exposure, and efficiency metrics
 ```
 
 The four stages can run independently:
@@ -220,6 +220,8 @@ Evaluate one ranked-list artifact directly:
 python -m research.run evaluate `
   --ranked-lists runs/eval/zero_shot_movielens/ranked_lists.json `
   --output runs/eval/zero_shot_movielens/metrics.json `
+  --per-record-output runs/eval/zero_shot_movielens/per_record_metrics.jsonl `
+  --position-exposure-output runs/eval/zero_shot_movielens/position_exposure.csv `
   --top-k 5 10
 ```
 
@@ -228,14 +230,28 @@ Repeat with each method-specific directory. Evaluation displays record-level pro
 | Group | Metrics | Direction |
 | --- | --- | --- |
 | Effectiveness | `hr@k`, `ndcg@k` | Higher is better |
-| Robustness | permutation Spearman, Kendall, top-k overlap | Higher is better |
-| Validity | PPI, GPI, PCR, LRI | Lower is better |
+| Preference validity | PPI, GPI | Lower is better |
+| Listwise stability | Kendall tau, Spearman rho, top-k overlap | Higher is better |
+| Position exposure | `E_k(p)` by input position and list length | Uniform exposure is desired |
 | Efficiency | passes, calls, batches, tokens, latency | Descriptive |
 | Generation validity | valid/repaired/failed rates and label errors | More valid, fewer repairs/errors |
 
-Effectiveness is averaged over user-permutation results. Robustness and validity compare permutations within each
-user before aggregation. At least two permutations are required; five or more provides more useful pairwise evidence.
-Repaired generated outputs remain in effectiveness results, so report output-validity statistics alongside them.
+Each user/query is the statistical unit. Effectiveness is first averaged across its permutations, while preference
+validity and listwise stability compare permutations within that query; query-level values are then averaged across
+the dataset. Deterministic query-level bootstrap confidence intervals are reported for all three groups. At least two
+permutations are required, while broader position coverage makes PPI more informative.
+
+PPI conditions pairwise preferences on equal-width input-position buckets and reports the candidate-pair coverage
+that supports the estimate. GPI builds a pairwise preference matrix, initializes a global order from aggregate wins,
+and improves it with deterministic pair swaps before measuring residual disagreement. Position exposure reports the
+probability that an item shown at input position `p` appears in the output top `k`; mixed list lengths are kept in
+separate strata. Invalid records, including duplicate, incomplete, or mismatched candidate rankings, are skipped with
+explicit reason counts rather than silently repaired during evaluation.
+
+`metrics.json` is the versioned aggregate report. `per_record_metrics.jsonl` stores query-level metrics and PPI/GPI
+diagnostics, and `position_exposure.csv` is a tidy export for plotting `E_k(p)`. Repaired generated outputs remain in
+effectiveness results, so report generation-validity statistics alongside them. Token and latency totals are only
+reported when the ranking metadata contains those measurements; unavailable measurements are represented as null.
 
 ## Configurations
 
@@ -303,6 +319,8 @@ runs/train/<run_name>/
 runs/eval/<method_name>/
 |-- ranked_lists.json
 |-- metrics.json
+|-- per_record_metrics.jsonl
+|-- position_exposure.csv
 `-- transition_matrix.json       # STELLA probing
 
 runs/paper/<experiment>/<run_id>/
@@ -324,7 +342,7 @@ prompt, and configuration identity.
 | `baselines.py` | Zero-shot, Bootstrapping, SGS, STELLA, and backend selection |
 | `generation.py` | Batched generated-ranking model adapter and parsing metadata |
 | `prompts.py` | RankGPT-style research prompts and label parsing |
-| `evaluation.py` | Effectiveness, robustness, validity, efficiency, and generation validity |
+| `evaluation.py` | Effectiveness, preference validity, listwise stability, exposure, and uncertainty |
 | `run.py` | Stage CLI, progress reporting, manifests, and reproduction orchestration |
 
 The reusable ranking contracts, InvariRank architecture, training API, and permutation suite remain in

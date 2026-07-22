@@ -462,7 +462,8 @@ framework responsibilities; they are documented in the [research guide](../resea
 ## Metrics and Persistence Boundary
 
 The suite returns aligned ranking evidence. General effectiveness and stability metrics are not calculated here;
-paper-specific HR, NDCG, Kendall, Spearman, top-k overlap, PPI, GPI, PCR, and LRI remain in `research/`.
+paper-specific HR, NDCG, PPI, GPI, Kendall, Spearman, top-k overlap, position exposure, and query-level uncertainty
+remain in `research/`.
 
 Versioned experiment persistence is also not implemented yet. A future `PermutationRun` may record mode, seed,
 settings, sample identity, and results for later robustness or position-bias analysis without model access.
