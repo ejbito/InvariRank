@@ -32,7 +32,7 @@ from .baselines import (
     stella_provenance,
 )
 from .data import build_dataset_splits, write_dataset_splits
-from .evaluation import evaluate
+from .evaluation import evaluate_with_per_record, write_position_exposure_csv
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "research" / "configs" / "paper.yaml"
@@ -47,6 +47,8 @@ PATH_KEYS = {
     "data_dir",
     "meta",
     "metrics_path",
+    "per_record_metrics_path",
+    "position_exposure_path",
     "movies",
     "output_dir",
     "ranked_lists_path",
@@ -159,6 +161,14 @@ def write_json(value: Any, path: str | Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("w", encoding="utf-8") as handle:
         json.dump(value, handle, ensure_ascii=False, indent=2)
+
+
+def write_jsonl(values: Sequence[Mapping[str, Any]], path: str | Path) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8") as handle:
+        for value in values:
+            handle.write(json.dumps(value, ensure_ascii=False) + "\n")
 
 
 def write_yaml(value: Any, path: str | Path) -> None:
@@ -411,6 +421,10 @@ def evaluate_records(
     ranked_lists_path: str | None = None,
     output_path: str | None = None,
     top_k: Sequence[int] | None = None,
+    per_record_output_path: str | None = None,
+    position_exposure_output_path: str | None = None,
+    position_buckets: int | None = None,
+    bootstrap_samples: int | None = None,
 ) -> dict[str, Any]:
     values = section(config, "evaluation") or dict(config)
     ranking_values = section(config, "ranking") or dict(config)
@@ -424,15 +438,30 @@ def evaluate_records(
         records = [json.loads(line) for line in text.splitlines() if line.strip()]
     if isinstance(records, dict):
         records = [records]
-    report = evaluate(
+    report, per_record = evaluate_with_per_record(
         records,
         top_k=tuple(top_k or values.get("top_k", [5, 10])),
+        position_buckets=int(position_buckets or values.get("position_buckets", 3)),
+        minimum_bucket_observations=int(values.get("minimum_bucket_observations", 1)),
+        confidence_level=float(values.get("confidence_level", 0.95)),
+        bootstrap_samples=int(
+            bootstrap_samples if bootstrap_samples is not None else values.get("bootstrap_samples", 1000)
+        ),
+        seed=int(values.get("seed", 42)),
         show_progress=True,
     )
     report["ranked_lists_path"] = str(source)
     report["efficiency"] = aggregate_efficiency(records)
     report["generation"] = aggregate_generation_validity(records)
     destination = output_path or values.get("metrics_path")
+    per_record_destination = per_record_output_path or values.get("per_record_metrics_path")
+    exposure_destination = position_exposure_output_path or values.get("position_exposure_path")
+    if per_record_destination:
+        write_jsonl(per_record, per_record_destination)
+        report["per_record_metrics_path"] = str(per_record_destination)
+    if exposure_destination:
+        write_position_exposure_csv(report["position_exposure"], exposure_destination)
+        report["position_exposure_path"] = str(exposure_destination)
     if destination:
         write_json(report, destination)
     return report
@@ -446,6 +475,8 @@ def aggregate_efficiency(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     input_tokens = 0
     generated_tokens = 0
     latency_seconds = 0.0
+    token_metadata_rankings = 0
+    latency_metadata_rankings = 0
     for record in records:
         for permutation in record.get("permutations", []):
             metadata = permutation.get("metadata", {})
@@ -455,9 +486,13 @@ def aggregate_efficiency(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]
             method_counts[method] = method_counts.get(method, 0) + 1
             generation_calls += int(metadata.get("generation_calls", 0))
             generation_batches += float(metadata.get("generation_batches", metadata.get("generation_calls", 0)))
-            input_tokens += int(metadata.get("input_tokens", 0))
+            if "input_tokens" in metadata:
+                input_tokens += int(metadata["input_tokens"])
+                token_metadata_rankings += 1
             generated_tokens += int(metadata.get("generated_tokens", 0))
-            latency_seconds += float(metadata.get("latency_seconds", 0.0))
+            if "latency_seconds" in metadata:
+                latency_seconds += float(metadata["latency_seconds"])
+                latency_metadata_rankings += 1
     total = sum(forward_passes)
     return {
         "num_rankings": len(forward_passes),
@@ -467,9 +502,11 @@ def aggregate_efficiency(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         "rankings_by_method": method_counts,
         "generation_calls": generation_calls,
         "generation_batches": generation_batches,
-        "input_tokens": input_tokens,
+        "input_tokens": input_tokens if token_metadata_rankings else None,
+        "input_token_metadata_rankings": token_metadata_rankings,
         "generated_tokens": generated_tokens,
-        "generation_latency_seconds": latency_seconds,
+        "generation_latency_seconds": latency_seconds if latency_metadata_rankings else None,
+        "latency_metadata_rankings": latency_metadata_rankings,
     }
 
 
@@ -606,6 +643,10 @@ def run_evaluate_stage(
     ranked_lists_path: str | None = None,
     output_path: str | None = None,
     top_k: Sequence[int] | None = None,
+    per_record_output_path: str | None = None,
+    position_exposure_output_path: str | None = None,
+    position_buckets: int | None = None,
+    bootstrap_samples: int | None = None,
 ) -> EvaluationArtifacts:
     evaluate_kwargs: dict[str, Any] = {}
     if ranked_lists_path is not None:
@@ -614,6 +655,14 @@ def run_evaluate_stage(
         evaluate_kwargs["output_path"] = output_path
     if top_k is not None:
         evaluate_kwargs["top_k"] = top_k
+    if per_record_output_path is not None:
+        evaluate_kwargs["per_record_output_path"] = per_record_output_path
+    if position_exposure_output_path is not None:
+        evaluate_kwargs["position_exposure_output_path"] = position_exposure_output_path
+    if position_buckets is not None:
+        evaluate_kwargs["position_buckets"] = position_buckets
+    if bootstrap_samples is not None:
+        evaluate_kwargs["bootstrap_samples"] = bootstrap_samples
     report = evaluate_records(config, **evaluate_kwargs)
     evaluation_values = section(config, "evaluation") or dict(config)
     destination = output_path or evaluation_values.get("metrics_path")
@@ -841,6 +890,8 @@ def resolve_experiment_config(config: Mapping[str, Any], experiment: Mapping[str
         {
             "ranked_lists_path": str(run_dir / "eval" / "ranked_lists.json"),
             "metrics_path": str(run_dir / "eval" / "metrics.json"),
+            "per_record_metrics_path": str(run_dir / "eval" / "per_record_metrics.jsonl"),
+            "position_exposure_path": str(run_dir / "eval" / "position_exposure.csv"),
         }
     )
     method = str(experiment["method"])
@@ -869,7 +920,10 @@ def _stage_artifacts(config: Mapping[str, Any], method: str, stage: str) -> list
     if stage == "rank":
         return [Path(config["ranking"]["ranked_lists_path"])]
     if stage == "evaluate":
-        return [Path(config["evaluation"]["metrics_path"])]
+        return [
+            Path(config["evaluation"][key])
+            for key in ("metrics_path", "per_record_metrics_path", "position_exposure_path")
+        ]
     raise ValueError(f"Unknown reproduction stage: {stage}")
 
 
@@ -1053,6 +1107,10 @@ def parse_args() -> argparse.Namespace:
     evaluation_parser.add_argument("--ranked-lists")
     evaluation_parser.add_argument("--output")
     evaluation_parser.add_argument("--top-k", nargs="+", type=int)
+    evaluation_parser.add_argument("--per-record-output")
+    evaluation_parser.add_argument("--position-exposure-output")
+    evaluation_parser.add_argument("--position-buckets", type=int)
+    evaluation_parser.add_argument("--bootstrap-samples", type=int)
 
     pipeline_parser = subparsers.add_parser(
         "pipeline",
@@ -1113,6 +1171,10 @@ def main() -> None:
             ranked_lists_path=args.ranked_lists,
             output_path=args.output,
             top_k=args.top_k,
+            per_record_output_path=args.per_record_output,
+            position_exposure_output_path=args.position_exposure_output,
+            position_buckets=args.position_buckets,
+            bootstrap_samples=args.bootstrap_samples,
         ).to_dict()
     else:
         result = reproduce(

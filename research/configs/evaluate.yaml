@@ -3,4 +3,11 @@ project_root: .
 evaluation:
   ranked_lists_path: runs/eval/invarirank_movielens/ranked_lists.json
   metrics_path: runs/eval/invarirank_movielens/metrics.json
+  per_record_metrics_path: runs/eval/invarirank_movielens/per_record_metrics.jsonl
+  position_exposure_path: runs/eval/invarirank_movielens/position_exposure.csv
   top_k: [5, 10]
+  position_buckets: 3
+  minimum_bucket_observations: 1
+  confidence_level: 0.95
+  bootstrap_samples: 1000
+  seed: 42
