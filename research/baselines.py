@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
@@ -39,6 +40,25 @@ def _permutation(permutation: Sequence[int] | None, count: int) -> list[int]:
     if len(result) != count or set(result) != set(range(count)):
         raise ValueError(f"permutation must contain every candidate index from 0 to {count - 1} exactly once.")
     return result
+
+
+def _request_seed(
+    seed: int,
+    sample: RankingSample,
+    permutation: Sequence[int],
+) -> int:
+    """Derive a reproducible random stream for one query and outer order."""
+    payload = {
+        "seed": int(seed),
+        "user_id": sample.user_id,
+        "split": sample.split,
+        "candidate_ids": [_candidate_id(candidate, index) for index, candidate in enumerate(sample.candidates)],
+        "permutation": [int(value) for value in permutation],
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False)
 
 
 def _with_metadata(result: RankingResult, method: str, forward_passes: int) -> RankingResult:
@@ -218,18 +238,26 @@ class Bootstrapping(Reranker):
     ) -> RankingResult:
         ranking_sample = _sample(sample)
         outer = _permutation(permutation, len(ranking_sample.candidates))
+        request_seed = _request_seed(self.seed, ranking_sample, outer)
         permutations = [outer]
         for sample_index in range(1, self.num_samples):
             shuffled = list(outer)
-            random.Random(self.seed + sample_index * 1009).shuffle(shuffled)
+            random.Random(request_seed + sample_index * 1009).shuffle(shuffled)
             permutations.append(shuffled)
         rankings = [self.reranker.rank(ranking_sample, permutation=value) for value in permutations]
-        return borda_aggregate(
+        result = borda_aggregate(
             ranking_sample,
             rankings,
             outer,
             method="bootstrapping",
             forward_passes=len(rankings),
+        )
+        return RankingResult(
+            user_id=result.user_id,
+            items=result.items,
+            permutation=result.permutation,
+            split=result.split,
+            metadata={**result.metadata, "seed": self.seed, "request_seed": request_seed},
         )
 
 
@@ -259,7 +287,8 @@ class StochasticGreedySelection(Reranker):
         selected: list[int] = []
         local_rankings: list[RankingResult] = []
         forward_passes = 0
-        generator = random.Random(self.seed)
+        request_seed = _request_seed(self.seed, ranking_sample, outer)
+        generator = random.Random(request_seed)
         while remaining:
             local_sample = RankingSample(
                 user_id=ranking_sample.user_id,
@@ -301,6 +330,7 @@ class StochasticGreedySelection(Reranker):
                 "selection_size": self.selection_size,
                 "shuffle_remaining": True,
                 "seed": self.seed,
+                "request_seed": request_seed,
                 **_combined_backend_metadata(local_rankings),
             },
         )
@@ -457,6 +487,7 @@ class Stella(Reranker):
         if count != self.calibrator.size:
             raise ValueError(f"STELLA matrix size {self.calibrator.size} does not match candidate count {count}.")
         outer = _permutation(permutation, count)
+        request_seed = _request_seed(self.seed, ranking_sample, outer)
         candidate_prior = np.full(count, 1.0 / count)
         posterior_records: list[tuple[float, int, RankingResult, RankingResult, float]] = []
         raw_rankings: list[RankingResult] = []
@@ -465,7 +496,7 @@ class Stella(Reranker):
         for update_index in range(self.max_updates):
             current = list(outer)
             if update_index:
-                random.Random(self.seed + update_index * 1009).shuffle(current)
+                random.Random(request_seed + update_index * 1009).shuffle(current)
             raw_result = self.reranker.rank(ranking_sample, permutation=current)
             raw_rankings.append(raw_result)
             predicted_candidate = raw_result.items[0].candidate_index
@@ -541,6 +572,8 @@ class Stella(Reranker):
                 "posterior_information_gain": information_gain,
                 "posterior_fallback": use_fallback,
                 "fallback_reason": "uninformative_posterior" if use_fallback else None,
+                "seed": self.seed,
+                "request_seed": request_seed,
                 "transition_diagnostics": dict(self.calibrator.diagnostics),
                 **_combined_backend_metadata(raw_rankings),
             },
