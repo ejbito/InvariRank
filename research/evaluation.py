@@ -14,7 +14,7 @@ from typing import Any
 
 from invarirank.framework import RankingResult
 
-EVALUATION_SCHEMA_VERSION = 2
+EVALUATION_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -22,10 +22,15 @@ class PermutationObservation:
     input_order: tuple[int, ...]
     output_order: tuple[int, ...]
     relevance: Mapping[int, int]
+    exposure_input_orders: tuple[tuple[int, ...], ...] | None = None
 
     @property
     def input_positions(self) -> dict[int, int]:
         return {candidate: position for position, candidate in enumerate(self.input_order)}
+
+    @property
+    def position_exposure_input_orders(self) -> tuple[tuple[int, ...], ...]:
+        return self.exposure_input_orders or (self.input_order,)
 
     @property
     def output_ranks(self) -> dict[int, int]:
@@ -195,6 +200,12 @@ def normalize_record(record: Mapping[str, Any]) -> tuple[QueryObservations | Non
         local_set = set(input_order)
         if set(output_order) != local_set or len(output_order) != len(input_order):
             errors.append(f"permutation_{permutation_index}_output_candidate_set_mismatch")
+        exposure_input_orders, exposure_errors = _position_exposure_input_orders(
+            permutation,
+            local_set,
+            permutation_index,
+        )
+        errors.extend(exposure_errors)
         if candidate_set is None:
             candidate_set = local_set
         elif local_set != candidate_set:
@@ -209,6 +220,7 @@ def normalize_record(record: Mapping[str, Any]) -> tuple[QueryObservations | Non
                 input_order=input_order,
                 output_order=output_order,
                 relevance=relevance,
+                exposure_input_orders=exposure_input_orders,
             )
         )
 
@@ -228,6 +240,41 @@ def normalize_record(record: Mapping[str, Any]) -> tuple[QueryObservations | Non
         ),
         [],
     )
+
+
+def _position_exposure_input_orders(
+    permutation: Mapping[str, Any],
+    candidate_set: set[int],
+    permutation_index: int,
+) -> tuple[tuple[tuple[int, ...], ...] | None, list[str]]:
+    metadata = permutation.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        return None, []
+    raw_orders = metadata.get("bootstrap_input_permutations")
+    if raw_orders is None:
+        return None, []
+    if not isinstance(raw_orders, Sequence) or isinstance(raw_orders, (str, bytes)) or not raw_orders:
+        return None, [f"permutation_{permutation_index}_bootstrap_input_permutations_invalid"]
+
+    orders = []
+    errors = []
+    for order_index, raw_order in enumerate(raw_orders):
+        if not isinstance(raw_order, Sequence) or isinstance(raw_order, (str, bytes)):
+            errors.append(f"permutation_{permutation_index}_bootstrap_input_{order_index}_invalid")
+            continue
+        try:
+            order = tuple(int(value) for value in raw_order)
+        except (TypeError, ValueError):
+            errors.append(f"permutation_{permutation_index}_bootstrap_input_{order_index}_contains_non_integer_values")
+            continue
+        if len(order) != len(candidate_set) or set(order) != candidate_set:
+            errors.append(f"permutation_{permutation_index}_bootstrap_input_{order_index}_candidate_set_mismatch")
+            continue
+        if len(order) != len(set(order)):
+            errors.append(f"permutation_{permutation_index}_bootstrap_input_{order_index}_has_duplicates")
+            continue
+        orders.append(order)
+    return (tuple(orders) if orders and not errors else None), errors
 
 
 def _observation_effectiveness(
@@ -576,11 +623,12 @@ def _position_exposure(
             exposed.setdefault((length, k, 0), [0] * length)
         for observation in query.observations:
             output_ranks = observation.output_ranks
-            for candidate, position in observation.input_positions.items():
-                totals[(length, 0)][position] += 1
-                for k in top_k:
-                    if output_ranks[candidate] < min(k, length):
-                        exposed[(length, k, 0)][position] += 1
+            for input_order in observation.position_exposure_input_orders:
+                for position, candidate in enumerate(input_order):
+                    totals[(length, 0)][position] += 1
+                    for k in top_k:
+                        if output_ranks[candidate] < min(k, length):
+                            exposed[(length, k, 0)][position] += 1
     output: dict[str, Any] = {}
     for length in sorted({query.list_length for query in queries}):
         observations = totals[(length, 0)]
@@ -652,6 +700,7 @@ def ranking_results_to_records(results: Sequence[RankingResult]) -> list[dict[st
                     "item_ids": [item.item_id for item in result.items],
                     "scores": [item.score for item in result.items],
                 },
+                "metadata": dict(result.metadata),
             }
         )
     return list(grouped.values())

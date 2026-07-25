@@ -257,7 +257,12 @@ class Bootstrapping(Reranker):
             items=result.items,
             permutation=result.permutation,
             split=result.split,
-            metadata={**result.metadata, "seed": self.seed, "request_seed": request_seed},
+            metadata={
+                **result.metadata,
+                "seed": self.seed,
+                "request_seed": request_seed,
+                "bootstrap_input_permutations": [list(value) for value in permutations],
+            },
         )
 
 
