@@ -154,6 +154,7 @@ ranking:
   adapter_path: runs/train/invarirank_movielens/checkpoints/final
   ranking_num_samples: 500
   eval_num_permutations: 20
+  batch_size: 8
   max_seq_length: 4096
   prompt_template: invarirank
   attention_mask: block

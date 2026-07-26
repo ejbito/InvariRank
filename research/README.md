@@ -154,6 +154,10 @@ The runner uses the same deterministic outer permutations for every method when 
 permutation count match. Each output record preserves original candidate identity, exact input permutations, scores,
 rankings, relevance, generation metadata, and efficiency data.
 
+Set `ranking.batch_size` or pass `--batch-size` to batch independent outer rankings during inference. The number of
+logical forward passes reported for each method is unchanged; ranking latency is recorded as amortized wall-clock time
+per final outer ranking from the executed batches.
+
 ### Methods and computational cost
 
 | Method | Default backend | Internal rankings per outer permutation |
@@ -235,6 +239,7 @@ Repeat with each method-specific directory. Evaluation displays record-level pro
 | Position exposure | `E_k(p)` by input position and list length | Uniform exposure is desired |
 | Efficiency | passes, calls, batches, tokens, latency | Descriptive |
 | Generation validity | valid/repaired/failed rates and label errors | More valid, fewer repairs/errors |
+| STELLA | Bayesian updates, posterior entropy/information gain, fallback rate, transition-matrix diagnostics | Descriptive |
 
 Each user/query is the statistical unit. Effectiveness is first averaged across its permutations, while preference
 validity and listwise stability compare permutations within that query; query-level values are then averaged across

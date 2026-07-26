@@ -152,6 +152,30 @@ def _rank_many(
     return results
 
 
+def _normalize_method_requests(
+    samples: Sequence[
+        RankingSample | Mapping[str, Any] | tuple[RankingSample | Mapping[str, Any], Sequence[int] | None]
+    ],
+    permutations: Sequence[Sequence[int] | None] | None,
+) -> list[tuple[RankingSample | Mapping[str, Any], Sequence[int] | None]]:
+    values = list(samples)
+    if permutations is not None:
+        if len(permutations) != len(values):
+            raise ValueError("permutations must contain one entry per sample.")
+        if any(isinstance(value, tuple) for value in values):
+            raise ValueError("Do not combine request tuples with the permutations argument.")
+        return list(zip(values, permutations, strict=True))  # type: ignore[arg-type]
+    requests = []
+    for value in values:
+        if isinstance(value, tuple):
+            if len(value) != 2:
+                raise ValueError("Rank request tuples must contain (sample, permutation).")
+            requests.append((value[0], value[1]))
+        else:
+            requests.append((value, None))
+    return requests
+
+
 def borda_aggregate(
     sample: RankingSample,
     rankings: Sequence[RankingResult],
@@ -219,6 +243,23 @@ class DirectMethod(Reranker):
     ) -> RankingResult:
         return _with_metadata(self.reranker.rank(sample, permutation=permutation), self.name, 1)
 
+    def rank_many(
+        self,
+        samples: Sequence[
+            RankingSample | Mapping[str, Any] | tuple[RankingSample | Mapping[str, Any], Sequence[int] | None]
+        ],
+        *,
+        permutations: Sequence[Sequence[int] | None] | None = None,
+        batch_size: int = 8,
+    ) -> list[RankingResult]:
+        requests = _normalize_method_requests(samples, permutations)
+        batched = getattr(self.reranker, "rank_many", None)
+        if callable(batched) and batch_size > 1:
+            results = list(batched(requests, batch_size=batch_size))
+        else:
+            results = [self.reranker.rank(sample, permutation=permutation) for sample, permutation in requests]
+        return [_with_metadata(result, self.name, 1) for result in results]
+
 
 class Bootstrapping(Reranker):
     """Permutation ensembling with Borda-count aggregation."""
@@ -230,40 +271,71 @@ class Bootstrapping(Reranker):
         self.num_samples = num_samples
         self.seed = seed
 
+    def _bootstrap_permutations(self, sample: RankingSample, outer: Sequence[int]) -> tuple[int, list[list[int]]]:
+        request_seed = _request_seed(self.seed, sample, outer)
+        permutations = [list(outer)]
+        for sample_index in range(1, self.num_samples):
+            shuffled = list(outer)
+            random.Random(request_seed + sample_index * 1009).shuffle(shuffled)
+            permutations.append(shuffled)
+        return request_seed, permutations
+
     def rank(
         self,
         sample: RankingSample | Mapping[str, Any],
         *,
         permutation: Sequence[int] | None = None,
     ) -> RankingResult:
-        ranking_sample = _sample(sample)
-        outer = _permutation(permutation, len(ranking_sample.candidates))
-        request_seed = _request_seed(self.seed, ranking_sample, outer)
-        permutations = [outer]
-        for sample_index in range(1, self.num_samples):
-            shuffled = list(outer)
-            random.Random(request_seed + sample_index * 1009).shuffle(shuffled)
-            permutations.append(shuffled)
-        rankings = [self.reranker.rank(ranking_sample, permutation=value) for value in permutations]
-        result = borda_aggregate(
-            ranking_sample,
-            rankings,
-            outer,
-            method="bootstrapping",
-            forward_passes=len(rankings),
-        )
-        return RankingResult(
-            user_id=result.user_id,
-            items=result.items,
-            permutation=result.permutation,
-            split=result.split,
-            metadata={
-                **result.metadata,
-                "seed": self.seed,
-                "request_seed": request_seed,
-                "bootstrap_input_permutations": [list(value) for value in permutations],
-            },
-        )
+        return self.rank_many([(sample, permutation)], batch_size=1)[0]
+
+    def rank_many(
+        self,
+        samples: Sequence[
+            RankingSample | Mapping[str, Any] | tuple[RankingSample | Mapping[str, Any], Sequence[int] | None]
+        ],
+        *,
+        permutations: Sequence[Sequence[int] | None] | None = None,
+        batch_size: int = 8,
+    ) -> list[RankingResult]:
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least one.")
+        requests = _normalize_method_requests(samples, permutations)
+        prepared = []
+        internal_requests: list[tuple[RankingSample, Sequence[int]]] = []
+        for sample, permutation in requests:
+            ranking_sample = _sample(sample)
+            outer = _permutation(permutation, len(ranking_sample.candidates))
+            request_seed, inner_permutations = self._bootstrap_permutations(ranking_sample, outer)
+            start = len(internal_requests)
+            internal_requests.extend((ranking_sample, value) for value in inner_permutations)
+            prepared.append((ranking_sample, outer, request_seed, inner_permutations, start))
+
+        rankings = _rank_many(self.reranker, internal_requests, batch_size=batch_size)
+        results = []
+        for ranking_sample, outer, request_seed, inner_permutations, start in prepared:
+            group = rankings[start : start + self.num_samples]
+            result = borda_aggregate(
+                ranking_sample,
+                group,
+                outer,
+                method="bootstrapping",
+                forward_passes=len(group),
+            )
+            results.append(
+                RankingResult(
+                    user_id=result.user_id,
+                    items=result.items,
+                    permutation=result.permutation,
+                    split=result.split,
+                    metadata={
+                        **result.metadata,
+                        "seed": self.seed,
+                        "request_seed": request_seed,
+                        "bootstrap_input_permutations": [list(value) for value in inner_permutations],
+                    },
+                )
+            )
+        return results
 
 
 class StochasticGreedySelection(Reranker):
@@ -487,56 +559,109 @@ class Stella(Reranker):
         *,
         permutation: Sequence[int] | None = None,
     ) -> RankingResult:
-        ranking_sample = _sample(sample)
-        count = len(ranking_sample.candidates)
-        if count != self.calibrator.size:
-            raise ValueError(f"STELLA matrix size {self.calibrator.size} does not match candidate count {count}.")
-        outer = _permutation(permutation, count)
-        request_seed = _request_seed(self.seed, ranking_sample, outer)
-        candidate_prior = np.full(count, 1.0 / count)
-        posterior_records: list[tuple[float, int, RankingResult, RankingResult, float]] = []
-        raw_rankings: list[RankingResult] = []
-        previous_entropy = None
-        stable_steps = 0
-        for update_index in range(self.max_updates):
-            current = list(outer)
-            if update_index:
-                random.Random(request_seed + update_index * 1009).shuffle(current)
-            raw_result = self.reranker.rank(ranking_sample, permutation=current)
-            raw_rankings.append(raw_result)
-            predicted_candidate = raw_result.items[0].candidate_index
-            predicted_position = current.index(predicted_candidate)
-            position_prior = np.asarray([candidate_prior[index] for index in current])
-            position_posterior = self.calibrator.update(position_prior, predicted_position)
-            for position, candidate_index in enumerate(current):
-                candidate_prior[candidate_index] = position_posterior[position]
-            entropy = float(-sum(value * math.log(value) for value in candidate_prior if value > 0))
-            information_gain = float(math.log(count) - entropy)
-            raw_positions = {item.candidate_index: rank for rank, item in enumerate(raw_result.items)}
-            posterior_order = sorted(
-                range(count),
-                key=lambda index: (-candidate_prior[index], raw_positions[index], outer.index(index)),
-            )
-            posterior_result = _probability_result(
-                ranking_sample,
-                outer,
-                posterior_order,
-                candidate_prior,
-                entropy,
-            )
-            posterior_records.append((entropy, update_index, posterior_result, raw_result, information_gain))
-            if previous_entropy is not None and abs(previous_entropy - entropy) <= self.convergence_tolerance:
-                stable_steps += 1
-            else:
-                stable_steps = 0
-            previous_entropy = entropy
-            if stable_steps >= self.convergence_steps:
-                break
+        return self.rank_many([(sample, permutation)], batch_size=1)[0]
 
+    def rank_many(
+        self,
+        samples: Sequence[
+            RankingSample | Mapping[str, Any] | tuple[RankingSample | Mapping[str, Any], Sequence[int] | None]
+        ],
+        *,
+        permutations: Sequence[Sequence[int] | None] | None = None,
+        batch_size: int = 8,
+    ) -> list[RankingResult]:
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least one.")
+        states = []
+        for sample, permutation in _normalize_method_requests(samples, permutations):
+            ranking_sample = _sample(sample)
+            count = len(ranking_sample.candidates)
+            if count != self.calibrator.size:
+                raise ValueError(f"STELLA matrix size {self.calibrator.size} does not match candidate count {count}.")
+            outer = _permutation(permutation, count)
+            states.append(
+                {
+                    "sample": ranking_sample,
+                    "outer": outer,
+                    "request_seed": _request_seed(self.seed, ranking_sample, outer),
+                    "candidate_prior": np.full(count, 1.0 / count),
+                    "posterior_records": [],
+                    "raw_rankings": [],
+                    "previous_entropy": None,
+                    "stable_steps": 0,
+                    "active": True,
+                }
+            )
+
+        for update_index in range(self.max_updates):
+            active = [index for index, state in enumerate(states) if state["active"]]
+            if not active:
+                break
+            batch_requests = []
+            currents = []
+            for state_index in active:
+                state = states[state_index]
+                current = list(state["outer"])
+                if update_index:
+                    random.Random(state["request_seed"] + update_index * 1009).shuffle(current)
+                currents.append(current)
+                batch_requests.append((state["sample"], current))
+            raw_results = _rank_many(self.reranker, batch_requests, batch_size=batch_size)
+            for state_index, current, raw_result in zip(active, currents, raw_results, strict=True):
+                self._update_state(states[state_index], current, raw_result, update_index)
+
+        return [self._finalize_state(state) for state in states]
+
+    def _update_state(
+        self,
+        state: dict[str, Any],
+        current: Sequence[int],
+        raw_result: RankingResult,
+        update_index: int,
+    ) -> None:
+        ranking_sample = state["sample"]
+        count = len(ranking_sample.candidates)
+        candidate_prior = state["candidate_prior"]
+        state["raw_rankings"].append(raw_result)
+        predicted_candidate = raw_result.items[0].candidate_index
+        predicted_position = list(current).index(predicted_candidate)
+        position_prior = np.asarray([candidate_prior[index] for index in current])
+        position_posterior = self.calibrator.update(position_prior, predicted_position)
+        for position, candidate_index in enumerate(current):
+            candidate_prior[candidate_index] = position_posterior[position]
+        entropy = float(-sum(value * math.log(value) for value in candidate_prior if value > 0))
+        information_gain = float(math.log(count) - entropy)
+        raw_positions = {item.candidate_index: rank for rank, item in enumerate(raw_result.items)}
+        posterior_order = sorted(
+            range(count),
+            key=lambda index: (-candidate_prior[index], raw_positions[index], state["outer"].index(index)),
+        )
+        posterior_result = _probability_result(
+            ranking_sample,
+            state["outer"],
+            posterior_order,
+            candidate_prior,
+            entropy,
+        )
+        state["posterior_records"].append((entropy, update_index, posterior_result, raw_result, information_gain))
+        previous_entropy = state["previous_entropy"]
+        if previous_entropy is not None and abs(previous_entropy - entropy) <= self.convergence_tolerance:
+            state["stable_steps"] += 1
+        else:
+            state["stable_steps"] = 0
+        state["previous_entropy"] = entropy
+        if state["stable_steps"] >= self.convergence_steps:
+            state["active"] = False
+
+    def _finalize_state(self, state: dict[str, Any]) -> RankingResult:
+        ranking_sample = state["sample"]
+        outer = state["outer"]
+        raw_rankings = state["raw_rankings"]
         selected_entropy, selected_update, posterior_result, raw_result, information_gain = min(
-            posterior_records,
+            state["posterior_records"],
             key=lambda value: (value[0], value[1]),
         )
+        count = len(ranking_sample.candidates)
         use_fallback = information_gain <= self.minimum_information_gain
         if not use_fallback:
             posterior_scores = {item.candidate_index: item.score for item in posterior_result.items}
@@ -578,7 +703,7 @@ class Stella(Reranker):
                 "posterior_fallback": use_fallback,
                 "fallback_reason": "uninformative_posterior" if use_fallback else None,
                 "seed": self.seed,
-                "request_seed": request_seed,
+                "request_seed": state["request_seed"],
                 "transition_diagnostics": dict(self.calibrator.diagnostics),
                 **_combined_backend_metadata(raw_rankings),
             },

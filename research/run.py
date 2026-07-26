@@ -280,6 +280,7 @@ def rank(
     num_samples: int | None = None,
     permutations: int | None = None,
     backend: str | None = None,
+    batch_size: int | None = None,
 ) -> list[dict[str, Any]]:
     values = section(config, "ranking") or dict(config)
     values["generation"] = section(config, "generation")
@@ -360,23 +361,61 @@ def rank(
     permutation_count = int(configured_permutations)
     if permutation_count < 1:
         raise ValueError("permutations must be at least one.")
+    configured_batch_size = batch_size if batch_size is not None else method_options.get(
+        "batch_size",
+        values.get("batch_size", 1),
+    )
+    ranking_batch_size = int(configured_batch_size)
+    if ranking_batch_size < 1:
+        raise ValueError("batch_size must be at least one.")
     seed = int(values.get("seed", 0))
-    records = []
+    records_by_sample_index: dict[int, dict[str, Any]] = {}
+    batch_requests: list[tuple[Mapping[str, Any], list[int]]] = []
+    batch_keys: list[tuple[int, int]] = []
     eligible_samples = sum(bool(sample.get("candidates")) for sample in samples)
     total_rankings = eligible_samples * permutation_count
     print(
         f"[Ranking] Ready: {eligible_samples} samples x {permutation_count} permutations = "
-        f"{total_rankings} outer rankings.",
+        f"{total_rankings} outer rankings; batch_size={ranking_batch_size}.",
         flush=True,
     )
     from tqdm.auto import tqdm
 
     with tqdm(total=total_rankings, desc=f"[Ranking] {method}", unit="ranking", dynamic_ncols=True) as progress:
+        def flush_batch() -> None:
+            if not batch_requests:
+                return
+            started = time.perf_counter()
+            results = reranker.rank_many(batch_requests, batch_size=ranking_batch_size)
+            latency_per_ranking = (time.perf_counter() - started) / len(results) if results else 0.0
+            for result, (sample_index, permutation_index) in zip(results, batch_keys, strict=True):
+                records_by_sample_index[sample_index]["permutations"].append(
+                    result_permutation_record(
+                        result,
+                        permutation_index,
+                        latency_seconds=latency_per_ranking,
+                    )
+                )
+            progress.update(len(results))
+            batch_requests.clear()
+            batch_keys.clear()
+
         for sample_index, sample in enumerate(samples):
             candidate_count = len(sample.get("candidates", []))
             if candidate_count == 0:
                 continue
-            permutation_records = []
+            records_by_sample_index[sample_index] = {
+                "sample_index": sample_index,
+                "method": method,
+                "backend": resolved_backend,
+                "user_id": sample.get("user_id"),
+                "split": sample.get("split", "test"),
+                "list_length": int(sample.get("list_length", candidate_count)),
+                "num_items": candidate_count,
+                "history": sample.get("history", []),
+                "candidates": sample["candidates"],
+                "permutations": [],
+            }
             for permutation_index in range(permutation_count):
                 progress.set_postfix(
                     user=f"{sample_index + 1}/{len(samples)}",
@@ -384,31 +423,14 @@ def rank(
                     refresh=True,
                 )
                 permutation = deterministic_permutation(candidate_count, sample_index, permutation_index, seed)
-                started = time.perf_counter()
-                result = reranker.rank(sample, permutation=permutation)
-                latency_seconds = time.perf_counter() - started
-                permutation_records.append(
-                    result_permutation_record(
-                        result,
-                        permutation_index,
-                        latency_seconds=latency_seconds,
-                    )
-                )
-                progress.update()
-            records.append(
-                {
-                    "sample_index": sample_index,
-                    "method": method,
-                    "backend": resolved_backend,
-                    "user_id": sample.get("user_id"),
-                    "split": sample.get("split", "test"),
-                    "list_length": int(sample.get("list_length", candidate_count)),
-                    "num_items": candidate_count,
-                    "history": sample.get("history", []),
-                    "candidates": sample["candidates"],
-                    "permutations": permutation_records,
-                }
-            )
+                batch_requests.append((sample, permutation))
+                batch_keys.append((sample_index, permutation_index))
+                if len(batch_requests) >= ranking_batch_size:
+                    flush_batch()
+        flush_batch()
+    records = [records_by_sample_index[index] for index in sorted(records_by_sample_index)]
+    for record in records:
+        record["permutations"].sort(key=lambda value: value["permutation_index"])
     output = method_options.get("ranked_lists_path") or method_options.get("output_path")
     if not output and method_options.get("output_dir"):
         output = str(Path(method_options["output_dir"]) / "ranked_lists.json")
@@ -558,7 +580,7 @@ def aggregate_stella(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         return {}
 
     def numeric_values(key: str) -> list[float]:
-        return [float(row[key]) for row in rows if isinstance(row.get(key), int | float)]
+        return [float(row[key]) for row in rows if isinstance(row.get(key), (int, float))]
 
     def average(key: str) -> float | None:
         values = numeric_values(key)
@@ -615,10 +637,7 @@ def aggregate_stella_transition_diagnostics(diagnostics: Sequence[Mapping[str, A
         report["calibration_probe_samples"] = latest["probe_samples"]
     if "relevant_targets" in latest:
         report["calibration_relevant_targets"] = latest["relevant_targets"]
-    distinct = {
-        json.dumps(diagnostic, sort_keys=True, default=str)
-        for diagnostic in diagnostics
-    }
+    distinct = {json.dumps(diagnostic, sort_keys=True, default=str) for diagnostic in diagnostics}
     report["metadata_rankings"] = len(diagnostics)
     report["distinct_transition_diagnostics"] = len(distinct)
     return report
@@ -721,6 +740,7 @@ def run_rank_stage(
     num_samples: int | None = None,
     permutations: int | None = None,
     backend: str | None = None,
+    batch_size: int | None = None,
     data_path: str | None = None,
     adapter_path: str | None = None,
 ) -> RankingArtifacts:
@@ -739,6 +759,8 @@ def run_rank_stage(
         rank_kwargs["permutations"] = permutations
     if backend is not None:
         rank_kwargs["backend"] = backend
+    if batch_size is not None:
+        rank_kwargs["batch_size"] = batch_size
     records = rank(resolved, **rank_kwargs)
     options = _method_options(resolved, method)
     output = options.get("ranked_lists_path") or options.get("output_path")
@@ -1216,6 +1238,7 @@ def parse_args() -> argparse.Namespace:
     rank_parser.add_argument("--num-samples", type=int)
     rank_parser.add_argument("--permutations", type=int)
     rank_parser.add_argument("--backend", choices=("generate", "span_logprob"))
+    rank_parser.add_argument("--batch-size", type=int)
 
     evaluation_parser = subparsers.add_parser("evaluate", help="Evaluate ranked-list records.")
     evaluation_parser.add_argument("--ranked-lists")
@@ -1278,6 +1301,7 @@ def main() -> None:
             num_samples=args.num_samples,
             permutations=args.permutations,
             backend=args.backend,
+            batch_size=args.batch_size,
         ).to_dict()
     elif args.command == "evaluate":
         result = run_evaluate_stage(
