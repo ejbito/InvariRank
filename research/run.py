@@ -6,6 +6,7 @@ import hashlib
 import json
 import random
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -243,9 +244,17 @@ def deterministic_permutation(
     return permutation
 
 
-def result_permutation_record(result: Any, permutation_index: int) -> dict[str, Any]:
+def result_permutation_record(
+    result: Any,
+    permutation_index: int,
+    *,
+    latency_seconds: float | None = None,
+) -> dict[str, Any]:
     by_index = {item.candidate_index: item for item in result.items}
     input_items = [by_index[index] for index in result.permutation]
+    metadata = dict(result.metadata)
+    if latency_seconds is not None:
+        metadata["ranking_latency_seconds"] = float(latency_seconds)
     return {
         "permutation_index": permutation_index,
         "input": {
@@ -259,7 +268,7 @@ def result_permutation_record(result: Any, permutation_index: int) -> dict[str, 
             "item_ids": [item.item_id for item in result.items],
             "scores": [item.score for item in result.items],
         },
-        "metadata": dict(result.metadata),
+        "metadata": metadata,
     }
 
 
@@ -375,8 +384,16 @@ def rank(
                     refresh=True,
                 )
                 permutation = deterministic_permutation(candidate_count, sample_index, permutation_index, seed)
+                started = time.perf_counter()
                 result = reranker.rank(sample, permutation=permutation)
-                permutation_records.append(result_permutation_record(result, permutation_index))
+                latency_seconds = time.perf_counter() - started
+                permutation_records.append(
+                    result_permutation_record(
+                        result,
+                        permutation_index,
+                        latency_seconds=latency_seconds,
+                    )
+                )
                 progress.update()
             records.append(
                 {
@@ -453,6 +470,9 @@ def evaluate_records(
     report["ranked_lists_path"] = str(source)
     report["efficiency"] = aggregate_efficiency(records)
     report["generation"] = aggregate_generation_validity(records)
+    stella = aggregate_stella(records)
+    if stella:
+        report["stella"] = stella
     destination = output_path or values.get("metrics_path")
     per_record_destination = per_record_output_path or values.get("per_record_metrics_path")
     exposure_destination = position_exposure_output_path or values.get("position_exposure_path")
@@ -477,6 +497,8 @@ def aggregate_efficiency(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     latency_seconds = 0.0
     token_metadata_rankings = 0
     latency_metadata_rankings = 0
+    ranking_latency_seconds = 0.0
+    ranking_latency_values = []
     for record in records:
         for permutation in record.get("permutations", []):
             metadata = permutation.get("metadata", {})
@@ -493,6 +515,10 @@ def aggregate_efficiency(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]
             if "latency_seconds" in metadata:
                 latency_seconds += float(metadata["latency_seconds"])
                 latency_metadata_rankings += 1
+            if "ranking_latency_seconds" in metadata:
+                value = float(metadata["ranking_latency_seconds"])
+                ranking_latency_seconds += value
+                ranking_latency_values.append(value)
     total = sum(forward_passes)
     return {
         "num_rankings": len(forward_passes),
@@ -507,7 +533,95 @@ def aggregate_efficiency(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         "generated_tokens": generated_tokens,
         "generation_latency_seconds": latency_seconds if latency_metadata_rankings else None,
         "latency_metadata_rankings": latency_metadata_rankings,
+        "ranking_latency_seconds": ranking_latency_seconds if ranking_latency_values else None,
+        "mean_ranking_latency_seconds": (
+            float(ranking_latency_seconds / len(ranking_latency_values)) if ranking_latency_values else None
+        ),
+        "max_ranking_latency_seconds": max(ranking_latency_values, default=None),
+        "ranking_latency_metadata_rankings": len(ranking_latency_values),
     }
+
+
+def aggregate_stella(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    rows = []
+    diagnostics = []
+    for record in records:
+        for permutation in record.get("permutations", []):
+            metadata = permutation.get("metadata", {})
+            if metadata.get("method") != "stella":
+                continue
+            rows.append(metadata)
+            value = metadata.get("transition_diagnostics")
+            if isinstance(value, Mapping):
+                diagnostics.append(value)
+    if not rows:
+        return {}
+
+    def numeric_values(key: str) -> list[float]:
+        return [float(row[key]) for row in rows if isinstance(row.get(key), int | float)]
+
+    def average(key: str) -> float | None:
+        values = numeric_values(key)
+        return float(sum(values) / len(values)) if values else None
+
+    forward_passes = [int(row.get("forward_passes", 1)) for row in rows]
+    updates = [int(row.get("bayesian_updates", row.get("forward_passes", 1))) for row in rows]
+    fallback_count = sum(bool(row.get("posterior_fallback", False)) for row in rows)
+    report: dict[str, Any] = {
+        "num_rankings": len(rows),
+        "total_forward_passes": sum(forward_passes),
+        "mean_forward_passes_per_ranking": float(sum(forward_passes) / len(forward_passes)),
+        "max_forward_passes_per_ranking": max(forward_passes),
+        "total_bayesian_updates": sum(updates),
+        "mean_bayesian_updates": float(sum(updates) / len(updates)),
+        "max_bayesian_updates": max(updates),
+        "mean_selected_entropy": average("selected_entropy"),
+        "mean_posterior_information_gain": average("posterior_information_gain"),
+        "fallback_count": fallback_count,
+        "fallback_rate": float(fallback_count / len(rows)),
+    }
+    selected_updates = numeric_values("selected_update")
+    if selected_updates:
+        report["mean_selected_update"] = float(sum(selected_updates) / len(selected_updates))
+        report["max_selected_update"] = int(max(selected_updates))
+    if diagnostics:
+        report["transition_matrix"] = aggregate_stella_transition_diagnostics(diagnostics)
+    return report
+
+
+def aggregate_stella_transition_diagnostics(diagnostics: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    latest = dict(diagnostics[-1])
+    stable_keys = (
+        "total_observations",
+        "probe_samples",
+        "relevant_targets",
+        "ensemble_steps",
+        "smoothing",
+        "mean_row_entropy",
+        "mean_normalized_row_entropy",
+        "mean_pairwise_total_variation",
+        "max_pairwise_total_variation",
+        "minimum_probability",
+        "maximum_probability",
+    )
+    report = {key: latest[key] for key in stable_keys if key in latest}
+    if "observations_per_true_position" in latest:
+        report["observations_per_true_position"] = latest["observations_per_true_position"]
+    if "row_entropies" in latest:
+        report["row_entropies"] = latest["row_entropies"]
+    if "total_observations" in latest:
+        report["calibration_rankings"] = latest["total_observations"]
+    if "probe_samples" in latest:
+        report["calibration_probe_samples"] = latest["probe_samples"]
+    if "relevant_targets" in latest:
+        report["calibration_relevant_targets"] = latest["relevant_targets"]
+    distinct = {
+        json.dumps(diagnostic, sort_keys=True, default=str)
+        for diagnostic in diagnostics
+    }
+    report["metadata_rankings"] = len(diagnostics)
+    report["distinct_transition_diagnostics"] = len(distinct)
+    return report
 
 
 def aggregate_generation_validity(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
