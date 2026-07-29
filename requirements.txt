@@ -3,7 +3,6 @@ transformers>=4.45
 peft>=0.12
 accelerate>=0.33
 numpy>=1.26
-scipy>=1.11
 PyYAML>=6.0
 recbole>=1.2.1
 tqdm>=4.66

@@ -524,291 +524,6 @@ class FirstStageRetriever(Protocol):
         """Return up to k candidate item IDs for a user."""
 
 
-class ManualLightGCNRetriever:
-    def __init__(self, config: Any):
-        import numpy as np
-        import torch
-
-        self.config = config
-        self.seed = int(cfg_get(config, "training.seed", 42))
-        self.embedding_dim = int(cfg_get(config, "retrieval.embedding_dim", 128))
-        self.num_layers = int(cfg_get(config, "retrieval.num_layers", 3))
-        self.epochs = int(cfg_get(config, "retrieval.epochs", 100))
-        self.learning_rate = float(cfg_get(config, "retrieval.learning_rate", 1e-3))
-        self.regularization = float(cfg_get(config, "retrieval.reg", 1e-5))
-        self.samples_per_epoch = int(cfg_get(config, "retrieval.edge_samples_per_epoch", 3_000_000))
-        self.batch_size = int(cfg_get(config, "retrieval.batch_size", 8192))
-        self.negatives = int(cfg_get(config, "retrieval.negatives_per_positive", 4))
-        self.rejection_tries = int(cfg_get(config, "retrieval.neg_rejection_max_tries", 10))
-        self.filter_seen = bool(cfg_get(config, "retrieval.filter_seen", True))
-        self.maximum_k = int(cfg_get(config, "retrieval.k_max", 1000))
-        self.edge_dropout = float(cfg_get(config, "retrieval.edge_dropout", 0.0))
-        self.hard_negative_ratio = float(cfg_get(config, "retrieval.hard_negative_ratio", 0.5))
-        self.hard_candidate_pool = int(cfg_get(config, "retrieval.hard_candidate_pool", 32))
-        self.normalize_embeddings = bool(cfg_get(config, "retrieval.normalize_embeddings", True))
-        deterministic = bool(cfg_get(config, "retrieval.deterministic", False))
-        self.deterministic = deterministic
-        use_cuda = bool(cfg_get(config, "retrieval.use_cuda", True)) and not deterministic
-        self.use_amp = bool(cfg_get(config, "retrieval.use_amp", True)) and not deterministic
-        self.device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
-        self.generator = np.random.default_rng(self.seed)
-        torch.manual_seed(self.seed)
-        if deterministic:
-            torch.use_deterministic_algorithms(True)
-
-        self.user_to_index: dict[Any, int] = {}
-        self.index_to_item: dict[int, Any] = {}
-        self.item_to_index: dict[Any, int] = {}
-        self.user_positive_sets: dict[int, set[int]] = {}
-        self.user_seen_indices: dict[int, Any] = {}
-        self.edge_users = None
-        self.edge_items = None
-        self.base_edge_users = None
-        self.base_edge_items = None
-        self.base_edge_weights = None
-        self.user_to_item = None
-        self.item_to_user = None
-        self.user_embedding = None
-        self.item_embedding = None
-        self.user_factors = None
-        self.item_factors = None
-        self.num_users = 0
-        self.num_items = 0
-
-    def fit(self, interactions: Iterable[tuple[Any, Any]]) -> ManualLightGCNRetriever:
-        import numpy as np
-        from scipy.sparse import csr_matrix
-        from tqdm.auto import tqdm
-
-        edges = list(dict.fromkeys(interactions))
-        if not edges:
-            raise ValueError("LightGCNRetriever requires at least one interaction")
-        users = sorted({user for user, _ in edges})
-        items = sorted({item for _, item in edges})
-        self.user_to_index = {user: index for index, user in enumerate(users)}
-        self.item_to_index = {item: index for index, item in enumerate(items)}
-        self.index_to_item = {index: item for item, index in self.item_to_index.items()}
-        self.num_users = len(users)
-        self.num_items = len(items)
-        rows = np.empty(len(edges), dtype=np.int64)
-        columns = np.empty(len(edges), dtype=np.int64)
-        positive_sets: dict[int, set[int]] = defaultdict(set)
-        for edge_index, (raw_user, raw_item) in enumerate(tqdm(edges, desc="[LightGCN] Encoding edges")):
-            user = self.user_to_index[raw_user]
-            item = self.item_to_index[raw_item]
-            rows[edge_index] = user
-            columns[edge_index] = item
-            positive_sets[user].add(item)
-        self.edge_users = rows
-        self.edge_items = columns
-        self.user_positive_sets = dict(positive_sets)
-        self.user_seen_indices = {
-            user: np.asarray(sorted(seen), dtype=np.int64) for user, seen in positive_sets.items()
-        }
-        matrix = csr_matrix(
-            (np.ones(len(edges), dtype=np.float32), (rows, columns)),
-            shape=(self.num_users, self.num_items),
-        )
-        self._prepare_graph(matrix)
-        self._refresh_adjacency()
-        self._initialize_embeddings()
-        self._train()
-        self._materialize()
-        return self
-
-    def _prepare_graph(self, matrix: Any) -> None:
-        import numpy as np
-
-        matrix = matrix.tocsr()
-        user_degree = np.asarray(matrix.sum(axis=1)).ravel().astype(np.float32)
-        item_degree = np.asarray(matrix.sum(axis=0)).ravel().astype(np.float32)
-        user_degree[user_degree == 0] = 1.0
-        item_degree[item_degree == 0] = 1.0
-        coordinates = matrix.tocoo()
-        self.base_edge_users = coordinates.row.astype(np.int64)
-        self.base_edge_items = coordinates.col.astype(np.int64)
-        self.base_edge_weights = (1.0 / np.sqrt(user_degree[coordinates.row] * item_degree[coordinates.col])).astype(
-            np.float32
-        )
-
-    def _refresh_adjacency(self, keep_probability: float = 1.0) -> None:
-        import numpy as np
-        import torch
-
-        users = self.base_edge_users
-        items = self.base_edge_items
-        weights = self.base_edge_weights
-        if keep_probability < 1.0:
-            keep = self.generator.random(len(users)) < keep_probability
-            if not keep.any():
-                keep[self.generator.integers(0, len(users))] = True
-            users = users[keep]
-            items = items[keep]
-            weights = weights[keep] / keep_probability
-        values = torch.tensor(weights, dtype=torch.float32, device=self.device)
-        self.user_to_item = torch.sparse_coo_tensor(
-            torch.tensor(np.vstack([users, items]), dtype=torch.int64, device=self.device),
-            values,
-            (self.num_users, self.num_items),
-        ).coalesce()
-        self.item_to_user = torch.sparse_coo_tensor(
-            torch.tensor(np.vstack([items, users]), dtype=torch.int64, device=self.device),
-            values,
-            (self.num_items, self.num_users),
-        ).coalesce()
-
-    def _initialize_embeddings(self) -> None:
-        import torch
-
-        self.user_embedding = torch.nn.Embedding(self.num_users, self.embedding_dim, device=self.device)
-        self.item_embedding = torch.nn.Embedding(self.num_items, self.embedding_dim, device=self.device)
-        torch.nn.init.xavier_uniform_(self.user_embedding.weight)
-        torch.nn.init.xavier_uniform_(self.item_embedding.weight)
-
-    def _propagate(self):
-        import torch
-
-        user_layers = [self.user_embedding.weight]
-        item_layers = [self.item_embedding.weight]
-        current_users = user_layers[0]
-        current_items = item_layers[0]
-        for _ in range(self.num_layers):
-            next_users = torch.sparse.mm(self.user_to_item, current_items)
-            next_items = torch.sparse.mm(self.item_to_user, current_users)
-            user_layers.append(next_users)
-            item_layers.append(next_items)
-            current_users, current_items = next_users, next_items
-        return torch.stack(user_layers).mean(dim=0), torch.stack(item_layers).mean(dim=0)
-
-    def _random_negatives(self, users: Any, count: int):
-        import numpy as np
-
-        negatives = self.generator.integers(0, self.num_items, size=(len(users), count), dtype=np.int64)
-        for row, user in enumerate(users):
-            positives = self.user_positive_sets[int(user)]
-            for column in range(count):
-                attempts = 0
-                while int(negatives[row, column]) in positives:
-                    negatives[row, column] = self.generator.integers(0, self.num_items)
-                    attempts += 1
-                    if attempts > self.rejection_tries and len(positives) >= self.num_items:
-                        raise ValueError("A user has interacted with every retriever item; negatives are unavailable.")
-        return negatives
-
-    def _hard_negatives(self, users: Any, user_factors: Any, item_factors: Any, count: int):
-        import numpy as np
-        import torch
-
-        pool_size = max(self.hard_candidate_pool, count)
-        candidates = self.generator.integers(
-            0,
-            self.num_items,
-            size=(len(users), pool_size),
-            dtype=np.int64,
-        )
-        user_tensor = torch.from_numpy(users).to(self.device)
-        candidate_tensor = torch.from_numpy(candidates).to(self.device)
-        with torch.no_grad():
-            scores = (user_factors[user_tensor].unsqueeze(1) * item_factors[candidate_tensor]).sum(dim=2)
-        output = np.empty((len(users), count), dtype=np.int64)
-        for row, user in enumerate(users):
-            positives = self.user_positive_sets[int(user)]
-            valid = [index for index, item in enumerate(candidates[row]) if int(item) not in positives]
-            valid.sort(key=lambda index: float(scores[row, index]), reverse=True)
-            picked = candidates[row, valid[:count]].tolist()
-            if len(picked) < count:
-                picked.extend(self._random_negatives(users[row : row + 1], count - len(picked))[0].tolist())
-            output[row] = picked[:count]
-        return output
-
-    def _sample_negatives(self, users: Any, user_factors: Any, item_factors: Any):
-        import numpy as np
-
-        hard_count = max(0, min(self.negatives, round(self.negatives * self.hard_negative_ratio)))
-        random_count = self.negatives - hard_count
-        parts = []
-        if hard_count:
-            parts.append(self._hard_negatives(users, user_factors, item_factors, hard_count))
-        if random_count:
-            parts.append(self._random_negatives(users, random_count))
-        return np.concatenate(parts, axis=1)
-
-    def _train(self) -> None:
-        import torch
-        import torch.nn.functional as functional
-        from tqdm.auto import tqdm
-
-        optimizer = torch.optim.Adam(
-            list(self.user_embedding.parameters()) + list(self.item_embedding.parameters()),
-            lr=self.learning_rate,
-        )
-        edge_count = len(self.edge_users)
-        progress = tqdm(range(self.epochs), desc="[LightGCN] Training")
-        for _ in progress:
-            self._refresh_adjacency(1.0 - self.edge_dropout if self.edge_dropout else 1.0)
-            optimizer.zero_grad(set_to_none=True)
-            all_users, all_items = self._propagate()
-            sample_count = min(self.samples_per_epoch, edge_count)
-            indices = self.generator.integers(0, edge_count, size=sample_count, dtype="int64")
-            positive_users = self.edge_users[indices]
-            positive_items = self.edge_items[indices]
-            losses = []
-            for start in range(0, sample_count, self.batch_size):
-                end = min(start + self.batch_size, sample_count)
-                users_array = positive_users[start:end]
-                items_array = positive_items[start:end]
-                negatives_array = self._sample_negatives(users_array, all_users, all_items)
-                users = torch.from_numpy(users_array).to(self.device)
-                items = torch.from_numpy(items_array).to(self.device)
-                negatives = torch.from_numpy(negatives_array).to(self.device)
-                user_vectors = all_users[users]
-                item_vectors = all_items[items]
-                negative_vectors = all_items[negatives]
-                positive_scores = (user_vectors * item_vectors).sum(dim=1, keepdim=True)
-                negative_scores = (user_vectors.unsqueeze(1) * negative_vectors).sum(dim=2)
-                bpr = -functional.logsigmoid(positive_scores - negative_scores).mean()
-                regularization = self.regularization * (
-                    user_vectors.pow(2).sum(dim=1).mean()
-                    + item_vectors.pow(2).sum(dim=1).mean()
-                    + negative_vectors.pow(2).sum(dim=2).mean()
-                )
-                losses.append(bpr + regularization)
-            loss = torch.stack(losses).mean()
-            loss.backward()
-            optimizer.step()
-            progress.set_postfix(loss=float(loss.detach().cpu()))
-
-    def _materialize(self) -> None:
-        import torch
-        import torch.nn.functional as functional
-
-        with torch.no_grad():
-            self._refresh_adjacency()
-            users, items = self._propagate()
-            if self.normalize_embeddings:
-                users = functional.normalize(users, dim=1)
-                items = functional.normalize(items, dim=1)
-        self.user_factors = users.detach().float().cpu().numpy()
-        self.item_factors = items.detach().float().cpu().numpy()
-
-    def retrieve(self, user_id: Any, k: int) -> list[Any]:
-        import numpy as np
-
-        if user_id not in self.user_to_index or k <= 0 or self.user_factors is None:
-            return []
-        user = self.user_to_index[user_id]
-        scores = self.item_factors @ self.user_factors[user]
-        if self.filter_seen:
-            scores[self.user_seen_indices.get(user, [])] = -np.inf
-        finite = np.isfinite(scores)
-        limit = min(k, self.maximum_k, int(finite.sum()))
-        if limit <= 0:
-            return []
-        indices = np.argpartition(-scores, limit - 1)[:limit]
-        indices = indices[np.argsort(-scores[indices])]
-        return [self.index_to_item[int(index)] for index in indices]
-
-
 class RecBoleRetriever:
     """RecBole-backed first-stage retriever for research candidate generation."""
 
@@ -980,27 +695,17 @@ class RecBoleRetriever:
         return Path(output_dir) / "recbole"
 
 
-MANUAL_LIGHTGCN_BACKENDS = frozenset({"lightgcn", "manual_lightgcn"})
 RECBOLE_BACKEND = "recbole"
-RETRIEVER_BACKENDS = frozenset({*MANUAL_LIGHTGCN_BACKENDS, RECBOLE_BACKEND})
+RETRIEVER_BACKENDS = frozenset({RECBOLE_BACKEND})
 
 
 def retrieval_backend(config: Any) -> str:
-    """Resolve the configured first-stage retrieval backend.
-
-    The legacy retrieval.method key is retained during the migration so existing
-    configs keep their current behavior.
-    """
-    backend = cfg_get(config, "retrieval.backend")
-    if backend is None:
-        backend = cfg_get(config, "retrieval.method", "lightgcn")
-    return str(backend).lower()
+    """Resolve the configured first-stage retrieval backend."""
+    return str(cfg_get(config, "retrieval.backend", RECBOLE_BACKEND)).lower()
 
 
 def build_first_stage_retriever(config: Any) -> FirstStageRetriever:
     backend = retrieval_backend(config)
-    if backend in MANUAL_LIGHTGCN_BACKENDS:
-        return ManualLightGCNRetriever(config)
     if backend == RECBOLE_BACKEND:
         return RecBoleRetriever(config)
     raise ValueError(f"Unsupported retrieval backend: {backend}. Expected one of {sorted(RETRIEVER_BACKENDS)}")
@@ -1034,10 +739,6 @@ def _flatten_recbole_tokens(values: Any) -> list[str]:
             output.extend(_flatten_recbole_tokens(value))
         return output
     return [str(values)]
-
-
-# Backward-compatible name for callers that imported the original manual class.
-LightGCNRetriever = ManualLightGCNRetriever
 
 
 def split_user_histories(
@@ -1312,9 +1013,6 @@ __all__ = [
     "BaseDataset",
     "DATASETS",
     "FirstStageRetriever",
-    "LightGCNRetriever",
-    "MANUAL_LIGHTGCN_BACKENDS",
-    "ManualLightGCNRetriever",
     "MovieLens32MDataset",
     "RECBOLE_BACKEND",
     "RETRIEVER_BACKENDS",

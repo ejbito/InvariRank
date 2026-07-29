@@ -94,7 +94,7 @@ python -m research.run evaluate `
 ```
 
 The research implementation includes Zero-shot, Bootstrapping, SGS, STELLA, LFT, and InvariRank; MovieLens 32M and
-Amazon Books processing; LightGCN retrieval; deterministic permutation runs; paper metrics; progress reporting; and a
+Amazon Books processing; RecBole first-stage retrieval; deterministic permutation runs; paper metrics; progress reporting; and a
 resumable reproduction matrix. Dataset setup, method costs, configurations, outputs, and complete commands are in the
 [research guide](research/README.md).
 

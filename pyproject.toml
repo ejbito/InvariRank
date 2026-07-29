@@ -24,7 +24,6 @@ research = [
     "pyarrow>=15.0",
     "PyYAML>=6.0",
     "recbole>=1.2.1",
-    "scipy>=1.11",
     "ujson>=5.9",
 ]
 dev = [

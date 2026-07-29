@@ -62,7 +62,7 @@ python -m research.run --config path/to/config.yaml candidates
 ## Stage 1: candidate-list generation
 
 The default [candidate configuration](configs/candidates.yaml) creates chronological train, validation, and test
-samples using MovieLens 32M and the manual LightGCN retrieval backend:
+samples using MovieLens 32M and RecBole first-stage retrieval:
 
 ```powershell
 python -m research.run candidates
@@ -88,11 +88,10 @@ Important controls include:
 | `data.training.max_users` | Maximum eligible users processed |
 | `data.split.history_length` | Maximum serialized recommendation history |
 | `data.sampling.list_sizes` | Candidate-set sizes to produce |
-| `data.retrieval.backend` | First-stage retrieval backend; `manual_lightgcn` now, `recbole` available |
-| `data.retrieval.model` | RecBole model name when `backend: recbole`; defaults currently record `LightGCN` |
-| `data.retrieval.epochs` | LightGCN optimization epochs |
-| `data.retrieval.edge_samples_per_epoch` | Sampled training edges per epoch |
-| `data.retrieval.use_cuda` / `use_amp` | GPU and mixed-precision retrieval |
+| `data.retrieval.backend` | First-stage retrieval backend; currently `recbole` |
+| `data.retrieval.model` | RecBole model name; defaults currently use `LightGCN` |
+| `data.retrieval.epochs` | RecBole retriever optimization epochs |
+| `data.retrieval.use_cuda` | GPU retrieval training when CUDA is available |
 
 MovieLens generation selects up to three future positive items and fills each list with retrieved hard negatives and
 catalogue candidates. `max_users` is an upper bound: chronological eligibility and positive-item requirements can
@@ -102,8 +101,8 @@ Candidate loading, metadata processing, retriever fitting, and list sampling dis
 resource-bounded run, reduce users, epochs, sampled edges, embedding dimension, and layers in a copied config; record
 those retrieval settings with any reported experiment.
 
-Set `data.retrieval.backend: recbole` to delegate first-stage retrieval to RecBole while keeping the repository's
-candidate-list JSONL schema unchanged. The adapter writes RecBole atomic interaction files under
+The RecBole adapter keeps the repository's candidate-list JSONL schema unchanged. It writes RecBole atomic interaction
+files under
 `data.retrieval.recbole_dir`, `data.paths.cache_dir/recbole`, or `data.paths.output_dir/recbole`, trains the configured
 RecBole model, and converts `full_sort_topk` recommendations back to the original item IDs used by the sampler.
 Generated records also include retrieval provenance, and `research.data.validate_candidate_records` can be used in
