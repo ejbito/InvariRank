@@ -1,4 +1,4 @@
-# Candidate-list generation with chronological splits and LightGCN retrieval.
+# Candidate-list generation with chronological splits and first-stage retrieval.
 project_root: .
 
 data:
@@ -24,6 +24,7 @@ data:
   reranking:
     max_history_items: 20
   retrieval:
+    backend: manual_lightgcn
     method: lightgcn
     k_max: 1500
     embedding_dim: 128

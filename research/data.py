@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 
 def cfg_get(config: Any, path: str, default: Any = None) -> Any:
@@ -441,7 +441,17 @@ class AmazonBooksDataset(BaseDataset):
                 self.user_histories[user_id] = history
 
 
-class LightGCNRetriever:
+class FirstStageRetriever(Protocol):
+    """Minimal first-stage retrieval contract used by candidate-list sampling."""
+
+    def fit(self, interactions: Iterable[tuple[Any, Any]]) -> FirstStageRetriever:
+        """Fit the retriever from user-item interactions."""
+
+    def retrieve(self, user_id: Any, k: int) -> list[Any]:
+        """Return up to k candidate item IDs for a user."""
+
+
+class ManualLightGCNRetriever:
     def __init__(self, config: Any):
         import numpy as np
         import torch
@@ -492,7 +502,7 @@ class LightGCNRetriever:
         self.num_users = 0
         self.num_items = 0
 
-    def fit(self, interactions: Iterable[tuple[Any, Any]]) -> LightGCNRetriever:
+    def fit(self, interactions: Iterable[tuple[Any, Any]]) -> ManualLightGCNRetriever:
         import numpy as np
         from scipy.sparse import csr_matrix
         from tqdm.auto import tqdm
@@ -726,6 +736,32 @@ class LightGCNRetriever:
         return [self.index_to_item[int(index)] for index in indices]
 
 
+RETRIEVER_BACKENDS = frozenset({"lightgcn", "manual_lightgcn"})
+
+
+def retrieval_backend(config: Any) -> str:
+    """Resolve the configured first-stage retrieval backend.
+
+    The legacy retrieval.method key is retained during the migration so existing
+    configs keep their current behavior.
+    """
+    backend = cfg_get(config, "retrieval.backend")
+    if backend is None:
+        backend = cfg_get(config, "retrieval.method", "lightgcn")
+    return str(backend).lower()
+
+
+def build_first_stage_retriever(config: Any) -> FirstStageRetriever:
+    backend = retrieval_backend(config)
+    if backend in RETRIEVER_BACKENDS:
+        return ManualLightGCNRetriever(config)
+    raise ValueError(f"Unsupported retrieval backend: {backend}. Expected one of {sorted(RETRIEVER_BACKENDS)}")
+
+
+# Backward-compatible name for callers that imported the original manual class.
+LightGCNRetriever = ManualLightGCNRetriever
+
+
 def split_user_histories(
     user_histories: Mapping[Any, list[dict[str, Any]]],
     history_length: int,
@@ -833,7 +869,7 @@ def sample_movielens(dataset: BaseDataset) -> tuple[list[dict], list[dict], list
     seed = int(cfg_get(config, "training.seed", 42))
     minimum_rating = float(cfg_get(config, "dataset.implicit_min_rating", 4.0))
     retrieval_pool = min(300, int(cfg_get(config, "retrieval.k_max", 1500)))
-    retriever = LightGCNRetriever(config).fit(build_train_interactions(splits, minimum_rating))
+    retriever = build_first_stage_retriever(config).fit(build_train_interactions(splits, minimum_rating))
     all_items = sorted(dataset.item_metadata)
     outputs: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
 
@@ -910,7 +946,7 @@ def sample_amazon_books(dataset: BaseDataset) -> tuple[list[dict], list[dict], l
     seed = int(cfg_get(config, "training.seed", 42))
     minimum_positives = int(cfg_get(config, "sampling.min_future_positives", 1))
     require_retrieved = bool(cfg_get(config, "sampling.amazon.require_retrieved_positive", True))
-    retriever = LightGCNRetriever(config).fit(build_train_interactions(splits, None))
+    retriever = build_first_stage_retriever(config).fit(build_train_interactions(splits, None))
     outputs: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
     all_items = sorted(dataset.item_metadata)
 
@@ -993,8 +1029,11 @@ __all__ = [
     "AmazonBooksDataset",
     "BaseDataset",
     "DATASETS",
+    "FirstStageRetriever",
     "LightGCNRetriever",
+    "ManualLightGCNRetriever",
     "MovieLens32MDataset",
+    "build_first_stage_retriever",
     "build_dataset_splits",
     "build_target_ranking",
     "cfg_get",

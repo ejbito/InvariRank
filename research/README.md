@@ -38,7 +38,7 @@ models require CLI authentication or an `HF_TOKEN`.
 ```text
 raw interactions
   -> chronological user splits
-  -> LightGCN retrieval and candidate lists
+  -> first-stage retrieval and candidate lists
   -> baseline inference or LFT/InvariRank training
   -> ranking under controlled input permutations
   -> effectiveness, preference validity, listwise stability, position exposure, and efficiency metrics
@@ -62,7 +62,7 @@ python -m research.run --config path/to/config.yaml candidates
 ## Stage 1: candidate-list generation
 
 The default [candidate configuration](configs/candidates.yaml) creates chronological train, validation, and test
-samples using MovieLens 32M and LightGCN retrieval:
+samples using MovieLens 32M and the manual LightGCN retrieval backend:
 
 ```powershell
 python -m research.run candidates
@@ -88,6 +88,7 @@ Important controls include:
 | `data.training.max_users` | Maximum eligible users processed |
 | `data.split.history_length` | Maximum serialized recommendation history |
 | `data.sampling.list_sizes` | Candidate-set sizes to produce |
+| `data.retrieval.backend` | First-stage retrieval backend; currently `manual_lightgcn` |
 | `data.retrieval.epochs` | LightGCN optimization epochs |
 | `data.retrieval.edge_samples_per_epoch` | Sampled training edges per epoch |
 | `data.retrieval.use_cuda` / `use_amp` | GPU and mixed-precision retrieval |
@@ -96,7 +97,7 @@ MovieLens generation selects up to three future positive items and fills each li
 catalogue candidates. `max_users` is an upper bound: chronological eligibility and positive-item requirements can
 produce fewer output records.
 
-Candidate loading, metadata processing, LightGCN fitting, and list sampling display progress bars. For a
+Candidate loading, metadata processing, retriever fitting, and list sampling display progress bars. For a
 resource-bounded run, reduce users, epochs, sampled edges, embedding dimension, and layers in a copied config; record
 those retrieval settings with any reported experiment.
 
@@ -262,7 +263,7 @@ reported when the ranking metadata contains those measurements; unavailable meas
 
 | Config | Purpose |
 | --- | --- |
-| [`configs/candidates.yaml`](configs/candidates.yaml) | Data paths, chronological splits, sampling, and LightGCN |
+| [`configs/candidates.yaml`](configs/candidates.yaml) | Data paths, chronological splits, sampling, and first-stage retrieval |
 | [`configs/train.yaml`](configs/train.yaml) | LFT/InvariRank model, LoRA, loss, and validation |
 | [`configs/rank.yaml`](configs/rank.yaml) | Baselines, adapters, generation, permutations, and outputs |
 | [`configs/evaluate.yaml`](configs/evaluate.yaml) | Ranked-list input, metric output, and top-k values |
@@ -343,7 +344,7 @@ prompt, and configuration identity.
 
 | Module | Responsibility |
 | --- | --- |
-| `data.py` | MovieLens/Amazon processing, chronological splits, LightGCN, candidates |
+| `data.py` | MovieLens/Amazon processing, chronological splits, first-stage retrieval, candidates |
 | `baselines.py` | Zero-shot, Bootstrapping, SGS, STELLA, and backend selection |
 | `generation.py` | Batched generated-ranking model adapter and parsing metadata |
 | `prompts.py` | RankGPT-style research prompts and label parsing |
