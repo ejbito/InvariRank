@@ -94,6 +94,79 @@ def validate_sample(sample: Mapping[str, Any]) -> None:
         raise ValueError("All candidate relevance labels must be integers")
 
 
+def candidate_record_issues(sample: Mapping[str, Any]) -> list[str]:
+    """Return schema and contract issues for one generated candidate-list record."""
+    issues = []
+    try:
+        validate_sample(sample)
+    except Exception as error:
+        issues.append(f"invalid_sample: {type(error).__name__}: {error}")
+        return issues
+
+    candidates = list(sample["candidates"])
+    candidate_ids = [candidate.get("item_id") for candidate in candidates]
+    history_ids = {item.get("item_id") for item in sample.get("history", [])}
+    if any(item_id in history_ids for item_id in candidate_ids):
+        issues.append("candidate_overlaps_history")
+    if not any(int(candidate.get("relevance", 0)) > 0 for candidate in candidates):
+        issues.append("missing_positive_candidate")
+    for index, candidate in enumerate(candidates):
+        title = candidate.get("title", candidate.get("name", ""))
+        if title is None or not str(title).strip():
+            issues.append(f"candidate_{index}_missing_title")
+        relevance = candidate.get("relevance")
+        if isinstance(relevance, bool) or not isinstance(relevance, int) or relevance < 0:
+            issues.append(f"candidate_{index}_invalid_relevance")
+    retrieval = sample.get("retrieval")
+    if retrieval is not None:
+        if not isinstance(retrieval, Mapping):
+            issues.append("retrieval_provenance_invalid")
+        elif not retrieval.get("backend"):
+            issues.append("retrieval_provenance_missing_backend")
+    return issues
+
+
+def validate_candidate_records(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Validate generated candidate-list records and return an aggregate report."""
+    issue_counts: Counter[str] = Counter()
+    total = 0
+    valid = 0
+    for index, record in enumerate(records):
+        total += 1
+        issues = candidate_record_issues(record)
+        if issues:
+            issue_counts.update(issues)
+            issue_counts.update({f"record_{index}_invalid": 1})
+        else:
+            valid += 1
+    return {
+        "records": total,
+        "valid_records": valid,
+        "invalid_records": total - valid,
+        "issues": dict(sorted(issue_counts.items())),
+    }
+
+
+def retrieval_provenance(config: Any) -> dict[str, Any]:
+    """Describe the first-stage retriever configuration stored with candidate samples."""
+    backend = retrieval_backend(config)
+    provenance = {
+        "backend": backend,
+        "model": cfg_get(config, "retrieval.model"),
+        "k_max": cfg_get(config, "retrieval.k_max"),
+        "filter_seen": cfg_get(config, "retrieval.filter_seen", True),
+        "seed": cfg_get(config, "retrieval.seed", cfg_get(config, "training.seed", 42)),
+    }
+    if backend == RECBOLE_BACKEND:
+        provenance.update(
+            {
+                "recbole_dataset_name": cfg_get(config, "retrieval.recbole_dataset_name"),
+                "recbole_dir": cfg_get(config, "retrieval.recbole_dir"),
+            }
+        )
+    return {key: value for key, value in provenance.items() if value is not None}
+
+
 def write_dataset_splits(
     train: list[dict[str, Any]],
     validation: list[dict[str, Any]],
@@ -1035,17 +1108,19 @@ def append_sample(
     history: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
     list_size: int,
+    retrieval: Mapping[str, Any] | None = None,
 ) -> None:
-    outputs[split].append(
-        {
-            "user_id": user_id,
-            "history": history,
-            "candidates": candidates,
-            "target_ranking": build_target_ranking(candidates),
-            "list_length": list_size,
-            "split": split,
-        }
-    )
+    sample = {
+        "user_id": user_id,
+        "history": history,
+        "candidates": candidates,
+        "target_ranking": build_target_ranking(candidates),
+        "list_length": list_size,
+        "split": split,
+    }
+    if retrieval is not None:
+        sample["retrieval"] = dict(retrieval)
+    outputs[split].append(sample)
 
 
 def _sampling_settings(dataset: BaseDataset) -> tuple[int, list[int], bool, dict[Any, tuple[list[dict], ...]]]:
@@ -1075,6 +1150,7 @@ def sample_movielens(dataset: BaseDataset) -> tuple[list[dict], list[dict], list
     minimum_rating = float(cfg_get(config, "dataset.implicit_min_rating", 4.0))
     retrieval_pool = min(300, int(cfg_get(config, "retrieval.k_max", 1500)))
     retriever = build_first_stage_retriever(config).fit(build_train_interactions(splits, minimum_rating))
+    provenance = retrieval_provenance(config)
     all_items = sorted(dataset.item_metadata)
     outputs: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
 
@@ -1139,7 +1215,7 @@ def sample_movielens(dataset: BaseDataset) -> tuple[list[dict], list[dict], list
                     deterministic,
                     f"{seed}-{user_id}-{split}-fill",
                 )
-                append_sample(outputs, split, user_id, history, candidates, list_size)
+                append_sample(outputs, split, user_id, history, candidates, list_size, retrieval=provenance)
     return outputs["train"], outputs["val"], outputs["test"]
 
 
@@ -1152,6 +1228,7 @@ def sample_amazon_books(dataset: BaseDataset) -> tuple[list[dict], list[dict], l
     minimum_positives = int(cfg_get(config, "sampling.min_future_positives", 1))
     require_retrieved = bool(cfg_get(config, "sampling.amazon.require_retrieved_positive", True))
     retriever = build_first_stage_retriever(config).fit(build_train_interactions(splits, None))
+    provenance = retrieval_provenance(config)
     outputs: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
     all_items = sorted(dataset.item_metadata)
 
@@ -1203,7 +1280,7 @@ def sample_amazon_books(dataset: BaseDataset) -> tuple[list[dict], list[dict], l
                     deterministic,
                     f"{seed}-{user_id}-{split}-fill",
                 )
-                append_sample(outputs, split, user_id, history, candidates, list_size)
+                append_sample(outputs, split, user_id, history, candidates, list_size, retrieval=provenance)
     return outputs["train"], outputs["val"], outputs["test"]
 
 
@@ -1245,11 +1322,14 @@ __all__ = [
     "build_first_stage_retriever",
     "build_dataset_splits",
     "build_target_ranking",
+    "candidate_record_issues",
     "cfg_get",
     "graded_relevance",
     "parse_movie_title",
+    "retrieval_provenance",
     "save_jsonl",
     "split_user_histories",
+    "validate_candidate_records",
     "validate_sample",
     "validate_recbole_retrieval_config",
     "write_dataset_splits",

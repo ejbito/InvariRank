@@ -106,6 +106,8 @@ Set `data.retrieval.backend: recbole` to delegate first-stage retrieval to RecBo
 candidate-list JSONL schema unchanged. The adapter writes RecBole atomic interaction files under
 `data.retrieval.recbole_dir`, `data.paths.cache_dir/recbole`, or `data.paths.output_dir/recbole`, trains the configured
 RecBole model, and converts `full_sort_topk` recommendations back to the original item IDs used by the sampler.
+Generated records also include retrieval provenance, and `research.data.validate_candidate_records` can be used in
+smoke tests to check schema validity, positive candidates, history overlap, relevance labels, titles, and provenance.
 
 ## Stage 2: framework training
 
