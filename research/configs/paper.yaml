@@ -101,6 +101,7 @@ data:
     max_history_items: 20
   retrieval:
     backend: manual_lightgcn
+    model: LightGCN
     method: lightgcn
     k_max: 1500
     embedding_dim: 128

@@ -736,7 +736,9 @@ class ManualLightGCNRetriever:
         return [self.index_to_item[int(index)] for index in indices]
 
 
-RETRIEVER_BACKENDS = frozenset({"lightgcn", "manual_lightgcn"})
+MANUAL_LIGHTGCN_BACKENDS = frozenset({"lightgcn", "manual_lightgcn"})
+RECBOLE_BACKEND = "recbole"
+RETRIEVER_BACKENDS = frozenset({*MANUAL_LIGHTGCN_BACKENDS, RECBOLE_BACKEND})
 
 
 def retrieval_backend(config: Any) -> str:
@@ -753,9 +755,22 @@ def retrieval_backend(config: Any) -> str:
 
 def build_first_stage_retriever(config: Any) -> FirstStageRetriever:
     backend = retrieval_backend(config)
-    if backend in RETRIEVER_BACKENDS:
+    if backend in MANUAL_LIGHTGCN_BACKENDS:
         return ManualLightGCNRetriever(config)
+    if backend == RECBOLE_BACKEND:
+        validate_recbole_retrieval_config(config)
+        raise NotImplementedError(
+            "RecBole retrieval is configured but the RecBoleRetriever adapter is not implemented."
+        )
     raise ValueError(f"Unsupported retrieval backend: {backend}. Expected one of {sorted(RETRIEVER_BACKENDS)}")
+
+
+def validate_recbole_retrieval_config(config: Any) -> None:
+    model = cfg_get(config, "retrieval.model")
+    if model is None:
+        raise ValueError("RecBole retrieval requires data.retrieval.model, for example 'LightGCN'.")
+    if not str(model).strip():
+        raise ValueError("RecBole retrieval model must be non-empty.")
 
 
 # Backward-compatible name for callers that imported the original manual class.
@@ -1031,8 +1046,11 @@ __all__ = [
     "DATASETS",
     "FirstStageRetriever",
     "LightGCNRetriever",
+    "MANUAL_LIGHTGCN_BACKENDS",
     "ManualLightGCNRetriever",
     "MovieLens32MDataset",
+    "RECBOLE_BACKEND",
+    "RETRIEVER_BACKENDS",
     "build_first_stage_retriever",
     "build_dataset_splits",
     "build_target_ranking",
@@ -1042,5 +1060,6 @@ __all__ = [
     "save_jsonl",
     "split_user_histories",
     "validate_sample",
+    "validate_recbole_retrieval_config",
     "write_dataset_splits",
 ]

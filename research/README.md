@@ -88,7 +88,8 @@ Important controls include:
 | `data.training.max_users` | Maximum eligible users processed |
 | `data.split.history_length` | Maximum serialized recommendation history |
 | `data.sampling.list_sizes` | Candidate-set sizes to produce |
-| `data.retrieval.backend` | First-stage retrieval backend; currently `manual_lightgcn` |
+| `data.retrieval.backend` | First-stage retrieval backend; `manual_lightgcn` now, `recbole` in the migration path |
+| `data.retrieval.model` | RecBole model name when `backend: recbole`; defaults currently record `LightGCN` |
 | `data.retrieval.epochs` | LightGCN optimization epochs |
 | `data.retrieval.edge_samples_per_epoch` | Sampled training edges per epoch |
 | `data.retrieval.use_cuda` / `use_amp` | GPU and mixed-precision retrieval |
