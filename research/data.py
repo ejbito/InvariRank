@@ -736,6 +736,177 @@ class ManualLightGCNRetriever:
         return [self.index_to_item[int(index)] for index in indices]
 
 
+class RecBoleRetriever:
+    """RecBole-backed first-stage retriever for research candidate generation."""
+
+    def __init__(self, config: Any):
+        validate_recbole_retrieval_config(config)
+        self.config = config
+        self.model_name = str(cfg_get(config, "retrieval.model")).strip()
+        self.seed = int(cfg_get(config, "retrieval.seed", cfg_get(config, "training.seed", 42)))
+        self.maximum_k = int(cfg_get(config, "retrieval.k_max", 1000))
+        self.filter_seen = bool(cfg_get(config, "retrieval.filter_seen", True))
+        self.dataset_name = str(cfg_get(config, "retrieval.recbole_dataset_name", "invarirank_recbole"))
+        self.raw_user_by_token: dict[str, Any] = {}
+        self.raw_item_by_token: dict[str, Any] = {}
+        self.user_token_by_raw: dict[Any, str] = {}
+        self.item_token_by_raw: dict[Any, str] = {}
+        self.config_object = None
+        self.dataset = None
+        self.model = None
+        self.test_data = None
+
+    def fit(self, interactions: Iterable[tuple[Any, Any]]) -> RecBoleRetriever:
+        edges = list(dict.fromkeys(interactions))
+        if not edges:
+            raise ValueError("RecBoleRetriever requires at least one interaction")
+        self._build_token_maps(edges)
+        self._write_atomic_interactions(edges)
+        self._fit_recbole()
+        return self
+
+    def retrieve(self, user_id: Any, k: int) -> list[Any]:
+        if k <= 0 or self.dataset is None or self.model is None or self.test_data is None:
+            return []
+        user_token = self.user_token_by_raw.get(user_id)
+        if user_token is None:
+            return []
+        try:
+            internal_user = self.dataset.token2id(self.dataset.uid_field, [user_token])
+        except (KeyError, ValueError, TypeError):
+            return []
+
+        from recbole.utils.case_study import full_sort_topk
+
+        limit = min(int(k), self.maximum_k, max(int(getattr(self.dataset, "item_num", 1)) - 1, 0))
+        if limit <= 0:
+            return []
+        device = self.config_object["device"] if self.config_object is not None else None
+        _, internal_items = full_sort_topk(internal_user, self.model, self.test_data, k=limit, device=device)
+        external_items = self.dataset.id2token(self.dataset.iid_field, internal_items.detach().cpu())
+        output = []
+        for token in _flatten_recbole_tokens(external_items):
+            raw_item = self.raw_item_by_token.get(str(token))
+            if raw_item is not None:
+                output.append(raw_item)
+        return output
+
+    def _build_token_maps(self, edges: list[tuple[Any, Any]]) -> None:
+        users = sorted({user for user, _ in edges}, key=str)
+        items = sorted({item for _, item in edges}, key=str)
+        self.user_token_by_raw = {user: _recbole_token(user) for user in users}
+        self.item_token_by_raw = {item: _recbole_token(item) for item in items}
+        if len(set(self.user_token_by_raw.values())) != len(self.user_token_by_raw):
+            raise ValueError("RecBole user tokens are not unique after string conversion.")
+        if len(set(self.item_token_by_raw.values())) != len(self.item_token_by_raw):
+            raise ValueError("RecBole item tokens are not unique after string conversion.")
+        self.raw_user_by_token = {token: user for user, token in self.user_token_by_raw.items()}
+        self.raw_item_by_token = {token: item for item, token in self.item_token_by_raw.items()}
+
+    def _write_atomic_interactions(self, edges: list[tuple[Any, Any]]) -> None:
+        dataset_dir = self._dataset_dir()
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        inter_path = dataset_dir / f"{self.dataset_name}.inter"
+        with inter_path.open("w", encoding="utf-8") as handle:
+            handle.write("user_id:token\titem_id:token\ttimestamp:float\n")
+            for timestamp, (user_id, item_id) in enumerate(edges, start=1):
+                handle.write(
+                    f"{self.user_token_by_raw[user_id]}\t{self.item_token_by_raw[item_id]}\t{float(timestamp)}\n"
+                )
+
+    def _fit_recbole(self) -> None:
+        from recbole.config import Config
+        from recbole.data import create_dataset, data_preparation
+        from recbole.utils import get_model, get_trainer, init_seed
+
+        config = Config(
+            model=self.model_name,
+            dataset=self.dataset_name,
+            config_dict=self._recbole_config(),
+        )
+        init_seed(config["seed"], config["reproducibility"])
+        dataset = create_dataset(config)
+        train_data, valid_data, test_data = data_preparation(config, dataset)
+        init_seed(config["seed"] + config["local_rank"], config["reproducibility"])
+        model_dataset = getattr(train_data, "_dataset", getattr(train_data, "dataset", dataset))
+        model = get_model(config["model"])(config, model_dataset).to(config["device"])
+        trainer = get_trainer(config["MODEL_TYPE"], config["model"])(config, model)
+        trainer.fit(
+            train_data,
+            valid_data,
+            saved=bool(cfg_get(self.config, "retrieval.recbole_save_model", False)),
+            show_progress=bool(cfg_get(self.config, "retrieval.show_progress", True)),
+        )
+        model.eval()
+        self.config_object = config
+        self.dataset = dataset
+        self.model = model
+        self.test_data = test_data
+
+    def _recbole_config(self) -> dict[str, Any]:
+        use_cuda = bool(cfg_get(self.config, "retrieval.use_cuda", True))
+        config = {
+            "data_path": str(self._data_path()),
+            "field_separator": "\t",
+            "USER_ID_FIELD": "user_id",
+            "ITEM_ID_FIELD": "item_id",
+            "TIME_FIELD": "timestamp",
+            "load_col": {"inter": ["user_id", "item_id", "timestamp"]},
+            "epochs": int(cfg_get(self.config, "retrieval.epochs", 100)),
+            "train_batch_size": int(cfg_get(self.config, "retrieval.batch_size", 8192)),
+            "eval_batch_size": int(cfg_get(self.config, "retrieval.eval_batch_size", 8192)),
+            "seed": self.seed,
+            "reproducibility": bool(cfg_get(self.config, "retrieval.deterministic", True)),
+            "gpu_id": "0" if use_cuda else "",
+            "checkpoint_dir": str(self._checkpoint_dir()),
+            "eval_args": {
+                "split": {"RS": [8, 1, 1]},
+                "group_by": "user",
+                "order": "RO",
+                "mode": "full",
+            },
+            "metrics": ["Recall"],
+            "topk": [10],
+            "valid_metric": "Recall@10",
+            "show_progress": bool(cfg_get(self.config, "retrieval.show_progress", True)),
+        }
+        if (learning_rate := cfg_get(self.config, "retrieval.learning_rate")) is not None:
+            config["learning_rate"] = float(learning_rate)
+        if (embedding_size := cfg_get(self.config, "retrieval.embedding_dim")) is not None:
+            config["embedding_size"] = int(embedding_size)
+        if (regularization := cfg_get(self.config, "retrieval.reg")) is not None:
+            config["reg_weight"] = float(regularization)
+        if (layers := cfg_get(self.config, "retrieval.num_layers")) is not None:
+            config["n_layers"] = int(layers)
+        if (negatives := cfg_get(self.config, "retrieval.negatives_per_positive")) is not None:
+            config["train_neg_sample_args"] = {"distribution": "uniform", "sample_num": int(negatives)}
+        extra = cfg_get(self.config, "retrieval.recbole_config", {})
+        if extra:
+            if not isinstance(extra, Mapping):
+                raise TypeError("data.retrieval.recbole_config must be a mapping when provided.")
+            config.update(dict(extra))
+        return config
+
+    def _data_path(self) -> Path:
+        return self._recbole_root()
+
+    def _dataset_dir(self) -> Path:
+        return self._data_path() / self.dataset_name
+
+    def _checkpoint_dir(self) -> Path:
+        return self._recbole_root() / "checkpoints"
+
+    def _recbole_root(self) -> Path:
+        configured = cfg_get(self.config, "retrieval.recbole_dir")
+        if configured:
+            return Path(configured)
+        cache_dir = cfg_get(self.config, "paths.cache_dir")
+        if cache_dir:
+            return Path(cache_dir) / "recbole"
+        output_dir = cfg_get(self.config, "paths.output_dir", "data/processed")
+        return Path(output_dir) / "recbole"
+
+
 MANUAL_LIGHTGCN_BACKENDS = frozenset({"lightgcn", "manual_lightgcn"})
 RECBOLE_BACKEND = "recbole"
 RETRIEVER_BACKENDS = frozenset({*MANUAL_LIGHTGCN_BACKENDS, RECBOLE_BACKEND})
@@ -758,10 +929,7 @@ def build_first_stage_retriever(config: Any) -> FirstStageRetriever:
     if backend in MANUAL_LIGHTGCN_BACKENDS:
         return ManualLightGCNRetriever(config)
     if backend == RECBOLE_BACKEND:
-        validate_recbole_retrieval_config(config)
-        raise NotImplementedError(
-            "RecBole retrieval is configured but the RecBoleRetriever adapter is not implemented."
-        )
+        return RecBoleRetriever(config)
     raise ValueError(f"Unsupported retrieval backend: {backend}. Expected one of {sorted(RETRIEVER_BACKENDS)}")
 
 
@@ -771,6 +939,28 @@ def validate_recbole_retrieval_config(config: Any) -> None:
         raise ValueError("RecBole retrieval requires data.retrieval.model, for example 'LightGCN'.")
     if not str(model).strip():
         raise ValueError("RecBole retrieval model must be non-empty.")
+    if not bool(cfg_get(config, "retrieval.filter_seen", True)):
+        raise ValueError("RecBole retrieval currently requires data.retrieval.filter_seen: true.")
+
+
+def _recbole_token(value: Any) -> str:
+    token = str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ").strip()
+    if not token:
+        raise ValueError("RecBole user and item IDs must be non-empty after string conversion.")
+    return token
+
+
+def _flatten_recbole_tokens(values: Any) -> list[str]:
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    if isinstance(values, (str, bytes)):
+        return [values.decode("utf-8") if isinstance(values, bytes) else values]
+    if isinstance(values, Iterable):
+        output = []
+        for value in values:
+            output.extend(_flatten_recbole_tokens(value))
+        return output
+    return [str(values)]
 
 
 # Backward-compatible name for callers that imported the original manual class.
@@ -1051,6 +1241,7 @@ __all__ = [
     "MovieLens32MDataset",
     "RECBOLE_BACKEND",
     "RETRIEVER_BACKENDS",
+    "RecBoleRetriever",
     "build_first_stage_retriever",
     "build_dataset_splits",
     "build_target_ranking",

@@ -88,7 +88,7 @@ Important controls include:
 | `data.training.max_users` | Maximum eligible users processed |
 | `data.split.history_length` | Maximum serialized recommendation history |
 | `data.sampling.list_sizes` | Candidate-set sizes to produce |
-| `data.retrieval.backend` | First-stage retrieval backend; `manual_lightgcn` now, `recbole` in the migration path |
+| `data.retrieval.backend` | First-stage retrieval backend; `manual_lightgcn` now, `recbole` available |
 | `data.retrieval.model` | RecBole model name when `backend: recbole`; defaults currently record `LightGCN` |
 | `data.retrieval.epochs` | LightGCN optimization epochs |
 | `data.retrieval.edge_samples_per_epoch` | Sampled training edges per epoch |
@@ -101,6 +101,11 @@ produce fewer output records.
 Candidate loading, metadata processing, retriever fitting, and list sampling display progress bars. For a
 resource-bounded run, reduce users, epochs, sampled edges, embedding dimension, and layers in a copied config; record
 those retrieval settings with any reported experiment.
+
+Set `data.retrieval.backend: recbole` to delegate first-stage retrieval to RecBole while keeping the repository's
+candidate-list JSONL schema unchanged. The adapter writes RecBole atomic interaction files under
+`data.retrieval.recbole_dir`, `data.paths.cache_dir/recbole`, or `data.paths.output_dir/recbole`, trains the configured
+RecBole model, and converts `full_sort_topk` recommendations back to the original item IDs used by the sampler.
 
 ## Stage 2: framework training
 

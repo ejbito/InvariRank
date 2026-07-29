@@ -53,6 +53,7 @@ PATH_KEYS = {
     "movies",
     "output_dir",
     "ranked_lists_path",
+    "recbole_dir",
     "ratings",
     "reviews",
     "run_dir",
