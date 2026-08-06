@@ -1,33 +1,58 @@
-# InvariRank: Position-Invariant Listwise Reranking
+<div align="center">
 
-[![Paper](https://img.shields.io/badge/paper-2604.27599-red.svg)](https://arxiv.org/abs/2604.27599)
+<h1>InvariRank</h1>
+
+<!-- <h3>Position-Invariant and Position-Bias-Aware LLM Reranking for Recommendation</h3> -->
+
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](#-license)
+<br>
+[![SIGIR Paper](https://img.shields.io/badge/SIGIR%20'26-ACM-2f4f4f.svg)](https://dl.acm.org/doi/abs/10.1145/3805712.3809952)
+[![SIGIR arXiv](https://img.shields.io/badge/SIGIR%20'26-arXiv%3A2604.27599-b31b1b.svg)](https://arxiv.org/abs/2604.27599)
+[![RecSys arXiv](https://img.shields.io/badge/RecSys%20'26-arXiv%3A2608.03091-b31b1b.svg)](https://arxiv.org/abs/2608.03091)
 
-Code for the paper ["One Pass, Any Order: Position-Invariant Listwise Reranking for LLM-Based Recommendation"](https://arxiv.org/abs/2604.27599).
+</div>
 
-InvariRank reranks a retrieved recommendation candidate set in one language-model pass while reducing sensitivity to
-the order in which candidates appear. It isolates candidate computation with structured attention, gives candidates a
-shared positional frame, and scores their marker spans directly.
+This repository contains reusable package code and experiment pipelines for studying position-invariant and
+position-bias-aware listwise LLM reranking for recommendation. The reusable `invarirank` package is kept separate from
+the `experiments` workflow used for paper-style two-stage recommendation experiments.
 
-## News
+## 📄 Papers
 
-- **[2026.04.30]** Paper available on [arXiv](https://arxiv.org/abs/2604.27599).
-- **[2026.04.02]** Paper accepted to the SIGIR 2026 short paper track.
+> **One Pass, Any Order: Position-Invariant Listwise Reranking for LLM-Based Recommendation**  
+> *Proceedings of the 49th International ACM SIGIR Conference on Research and Development in Information Retrieval
+> (SIGIR '26).*  
+> [ACM](https://dl.acm.org/doi/abs/10.1145/3805712.3809952) | [arXiv](https://arxiv.org/abs/2604.27599)
 
-## What is in this repository?
+> **Position Bias Undermines Preference Consistency in Listwise LLM-Based Reranking**  
+> *Proceedings of the 20th ACM Conference on Recommender Systems (RecSys '26).*  
+> [arXiv](https://arxiv.org/abs/2608.03091)
 
-The repository has two active, deliberately separate capabilities:
+## ✨ Highlights
+
+- **Reusable package API.** `invarirank/` provides reusable reranking contracts, configuration, inference, training,
+  serialization, and controlled input-order experiments.
+- **Experiment-first workflow.** `experiments/` contains the repo-only pipeline for dataset preparation, retrieval,
+  candidate export, reranker training/inference, and evaluation.
+- **Multiple reranking methods.** The experiment layer supports zero-shot reranking, bootstrapping, STELLA, SGS, and
+  InvariRank-style marker scoring.
+- **Position-bias analysis.** Reranker evaluation includes preference consistency metrics, with separate analysis for
+  marginal top-k input-position exposure.
+- **Two-stage recommendation setup.** The scripts follow the retrieval-to-reranking workflow used across the papers.
+
+## 🧭 Repository Guide
+
+The repository has two deliberately separate parts:
 
 | Area | Purpose | Documentation |
 | --- | --- | --- |
-| `invarirank/` | Reusable recommendation inference, training, serialization, and permutation experiments | [Framework guide](invarirank/README.md) |
-| `research/` | Candidate generation, paper baselines, evaluation, and experiment reproduction | [Research guide](research/README.md) |
+| `invarirank/` | Importable Python package for reusable reranking contracts, InvariRank inference/training, serialization, and controlled input-order experiments. | [Framework guide](invarirank/README.md) |
+| `experiments/` | Repo-only experiment workflow around the package: dataset preparation, retrieval, candidate export, paper rerankers, and metrics. | [Experiments guide](experiments/README.md) |
 
-The currently implemented InvariRank workflow assumes a recommendation domain. We plan to extend the framework to
-additional domains and add a dedicated position-bias analysis suite in future work.
+Use `invarirank/` when you want a package API. Use `experiments/` when you want to reproduce or extend the paper-style
+two-stage recommendation pipeline.
 
-## Installation
+## 🛠️ Installation
 
 Use Python 3.10 or newer. From a repository checkout:
 
@@ -37,19 +62,62 @@ python -m pip install --upgrade pip
 pip install -e .
 ```
 
-Install optional dependencies only when needed:
+Optional extras:
 
 ```bash
-pip install -e ".[train]"           # LoRA training
-pip install -e ".[research]"        # repository research tools
-pip install -e ".[train,research]"  # complete experiment workflow
-pip install -e ".[dev]"             # tests and Ruff
+pip install -e ".[train]"
+pip install -e ".[experiments]"
+pip install -e ".[train,experiments]"
 ```
 
-The installable wheel contains only `invarirank`. Research commands and YAML configurations require a repository
-checkout. Gated Hugging Face models also require CLI authentication or an `HF_TOKEN`.
+The `train` extra is for LoRA fine-tuning and PEFT adapter loading. The `experiments` extra is for dataset processing,
+retrieval, candidate export, paper rerankers, and evaluation. Gated Hugging Face models require CLI authentication or
+an `HF_TOKEN`.
 
-## Minimal framework example
+## 🚀 Experiment Flow
+
+The experiment workflow is:
+
+```text
+prepare dataset
+-> train retriever
+-> evaluate retriever
+-> export candidates
+-> train reranker
+-> run reranker
+-> evaluate reranker
+-> analyze position bias
+```
+
+`train_reranker` is optional. Use it only when creating a fine-tuned InvariRank marker adapter. Zero-shot,
+bootstrapping, STELLA, and SGS runs can go directly from candidate export to reranker inference.
+Position-bias analysis is a separate optional stage for marginal top-k input-position exposure.
+
+The [experiments guide](experiments/README.md) is the command reference for this workflow. It shows each script stage
+with every available option, including boolean flags and path overrides.
+
+## 🔁 Reranking Methods
+
+The experiment reranking layer exposes four methods:
+
+```text
+zero_shot
+bootstrapping
+stella
+sgs
+```
+
+Supported prompt/scoring pairs:
+
+| Prompt | Scoring | Use |
+| --- | --- | --- |
+| `rankgpt` | `generation` | JSON generated-output ranking. |
+| `marker` | `marker_logprob` | InvariRank marker prompt with marker-span log-probability scoring. |
+
+Fine-tuned LFT and InvariRank adapters are loaded with `--adapter-path` and marker scoring. Saved framework adapters
+restore their tokenizer assets and architecture configuration automatically.
+
+## 📦 Package Example
 
 ```python
 from invarirank import InvariRankReranker, RerankerConfig
@@ -75,46 +143,22 @@ for item in result.items:
     print(item.item_id, item.score)
 ```
 
-This adapter example requires the `train` extra. Omit `adapter_path` when loading an unadapted causal model.
+See the [framework guide](invarirank/README.md) for the package API and the [experiments guide](experiments/README.md)
+for the full pipeline.
 
-The framework also supports padded batched inference, controlled permutations, external score/order callbacks,
-LambdaRank training, and complete save/reload operations. See the [framework guide](invarirank/README.md) for the
-input contract and full API.
-
-## Research workflow
-
-Research stages are independently runnable from the repository root:
-
-```powershell
-python -m research.run candidates
-python -m research.run rank --method zero_shot --num-samples 100 --permutations 5
-python -m research.run evaluate `
-  --ranked-lists runs/eval/zero_shot_movielens/ranked_lists.json `
-  --output runs/eval/zero_shot_movielens/metrics.json
-```
-
-The research implementation includes Zero-shot, Bootstrapping, SGS, STELLA, LFT, and InvariRank; MovieLens 32M and
-Amazon Books processing; RecBole first-stage retrieval; deterministic permutation runs; paper metrics; progress reporting; and a
-resumable reproduction matrix. Dataset setup, method costs, configurations, outputs, and complete commands are in the
-[research guide](research/README.md).
-
-## Repository layout
+## 📁 Repository Layout
 
 ```text
-invarirank/             reusable Python framework
-research/               checkout-only research pipeline
-research/configs/       stage and reproduction configurations
-pyproject.toml          package metadata and dependencies
+invarirank/             reusable Python package
+experiments/            repo-only experiment pipeline
+experiments/configs/    dataset, retriever, and reranker defaults
+requirements.txt        direct dependency list
+pyproject.toml          package metadata and optional extras
 ```
 
-## Development
+## 📝 Citation
 
-```bash
-python -m ruff check .
-python -m ruff format --check invarirank
-```
-
-## Citation
+Please cite the relevant paper when using this repository.
 
 ```bibtex
 @inproceedings{10.1145/3805712.3809952,
@@ -127,7 +171,7 @@ address = {New York, NY, USA},
 url = {https://doi.org/10.1145/3805712.3809952},
 doi = {10.1145/3805712.3809952},
 booktitle = {Proceedings of the 49th International ACM SIGIR Conference on Research and Development in Information Retrieval},
-pages = {3625–3629},
+pages = {3625-3629},
 numpages = {5},
 keywords = {recommender systems, large language models, listwise ranking, permutation invariance, position bias},
 location = {Australia},
@@ -135,6 +179,18 @@ series = {SIGIR '26}
 }
 ```
 
-## License
+The RecSys citation will be updated to the official ACM citation when it becomes available.
+
+```bibtex
+@misc{bito2026positionbias,
+title = {Position Bias Undermines Preference Consistency in Listwise LLM-Based Reranking},
+year = {2026},
+eprint = {2608.03091},
+archivePrefix = {arXiv},
+url = {https://arxiv.org/abs/2608.03091}
+}
+```
+
+## 📜 License
 
 This project is released under the [MIT License](LICENSE).

@@ -19,47 +19,13 @@ train = [
     "accelerate>=0.33",
     "peft>=0.12",
 ]
-research = [
+experiments = [
+    "implicit>=0.7",
     "pandas>=2.0",
-    "pyarrow>=15.0",
     "PyYAML>=6.0",
-    "recbole>=1.2.1",
-    "ujson>=5.9",
-]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.6",
+    "scipy>=1.9",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["invarirank*"]
-
-[tool.ruff]
-target-version = "py310"
-line-length = 120
-exclude = [
-    ".venv",
-    "venv",
-    "data",
-    "runs",
-    "checkpoints",
-    "fine-tuned",
-]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
-ignore = []
-
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-line-ending = "auto"
-
-[tool.pytest.ini_options]
-addopts = "-ra"
-testpaths = ["tests"]
-markers = [
-    "integration: optional tests that may download and load a small external model",
-]
