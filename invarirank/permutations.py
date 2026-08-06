@@ -8,7 +8,8 @@ from collections.abc import Callable, Mapping, Sequence
 from numbers import Real
 from typing import Any
 
-from .framework import RankedItem, RankingResult, RankingSample, Reranker
+from .contracts import RankedItem, RankingResult, RankingSample, Reranker, _normalize_rank_requests
+from .prompts import candidate_id as _candidate_id
 
 SampleLike = RankingSample | Mapping[str, Any]
 Permutation = Sequence[int] | None
@@ -103,7 +104,7 @@ class CallableReranker(Reranker):
         batch_size: int = 8,
     ) -> list[RankingResult]:
         size = _positive_integer(batch_size, "batch_size")
-        requests = _normalize_requests(samples, permutations)
+        requests = _normalize_rank_requests(samples, permutations)
         if self.batch_score_fn is None and self.batch_order_fn is None:
             return [self.rank(sample, permutation=permutation) for sample, permutation in requests]
 
@@ -289,28 +290,6 @@ def _prepare_request(
     return ranking_sample, resolved, [ranking_sample.candidates[index] for index in resolved]
 
 
-def _normalize_requests(
-    samples: Sequence[RankRequest],
-    permutations: Sequence[Permutation] | None,
-) -> list[tuple[SampleLike, Permutation]]:
-    values = list(samples)
-    if permutations is not None:
-        if len(permutations) != len(values):
-            raise ValueError("permutations must contain one entry per sample.")
-        if any(isinstance(value, tuple) for value in values):
-            raise ValueError("Do not combine request tuples with the permutations argument.")
-        return list(zip(values, permutations, strict=True))  # type: ignore[arg-type]
-    requests = []
-    for value in values:
-        if isinstance(value, tuple):
-            if len(value) != 2:
-                raise ValueError("Rank request tuples must contain (sample, permutation).")
-            requests.append((value[0], value[1]))
-        else:
-            requests.append((value, None))
-    return requests
-
-
 def _validate_scores(values: Sequence[float], expected: int) -> list[float]:
     try:
         scores = list(values)
@@ -384,13 +363,6 @@ def _callable_result(
         split=sample.split,
         metadata={"method": method_name, "output_backend": "callable", "callback_type": callback_type, **metadata},
     )
-
-
-def _candidate_id(candidate: Mapping[str, Any], fallback: int) -> str:
-    for key in ("item_id", "id", "asin", "movie_id"):
-        if key in candidate:
-            return str(candidate[key])
-    return str(fallback)
 
 
 def _required_item_id(candidate: Mapping[str, Any], index: int) -> str:

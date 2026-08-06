@@ -4,19 +4,14 @@ import json
 import math
 import random
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import replace
 from numbers import Integral
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from .framework import (
-    InvariRankReranker,
-    RankingSample,
-    RerankerConfig,
-    _load_json_mapping,
-    _save_json_mapping,
-)
+from .config import RerankerConfig, TrainingConfig
+from .contracts import RankingSample
 from .modeling import (
     align_scores_to_shared_candidates,
     build_lora_model,
@@ -24,6 +19,7 @@ from .modeling import (
     select_device,
 )
 from .prompts import build_prompt, candidate_id, extract_relevance_labels
+from .reranker import InvariRankReranker
 
 
 def _metric_values(values: Any) -> list[float]:
@@ -69,75 +65,6 @@ def _spearman_rho_from_rank_maps(first: dict[Any, int], second: dict[Any, int]) 
         return None
     difference_squared = sum((first[key] - second[key]) ** 2 for key in keys)
     return float(1.0 - (6.0 * difference_squared) / (count * (count * count - 1)))
-
-
-@dataclass(frozen=True)
-class TrainingConfig:
-    seed: int = 42
-    train_num_permutations: int = 1
-    eval_num_permutations: int = 10
-    val_perms_deterministic: bool = True
-    gradient_accumulation_steps: int = 16
-    learning_rate: float = 5e-5
-    weight_decay: float = 0.0
-    max_grad_norm: float = 1.0
-    lambda_rank: float = 1.0
-    lambda_perm: float = 0.0
-    permutation_loss: str = "kl"
-    num_epochs: int | None = None
-    total_optimizer_steps: int | None = 500
-    save_every_steps: int | None = None
-    lora_r: int = 16
-    lora_alpha: int = 32
-    lora_dropout: float = 0.05
-    lora_target_modules: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj")
-    extras: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "extras", dict(self.extras or {}))
-        if self.train_num_permutations < 1 or self.eval_num_permutations < 1:
-            raise ValueError("Permutation counts must be at least one.")
-        if self.gradient_accumulation_steps < 1:
-            raise ValueError("gradient_accumulation_steps must be at least one.")
-        if self.learning_rate <= 0:
-            raise ValueError("learning_rate must be greater than zero.")
-        if self.num_epochs is None and self.total_optimizer_steps is None:
-            raise ValueError("Set num_epochs or total_optimizer_steps.")
-        if self.permutation_loss not in {"kl", "symkl", "jeffreys"}:
-            raise ValueError(f"Unsupported permutation_loss: {self.permutation_loss}")
-
-    @classmethod
-    def from_mapping(cls, values: Mapping[str, Any]) -> TrainingConfig:
-        data = dict(values)
-        known = {item.name for item in fields(cls)} - {"extras"}
-        kwargs = {key: data.pop(key) for key in list(data) if key in known}
-        if "lora_target_modules" in kwargs:
-            kwargs["lora_target_modules"] = tuple(kwargs["lora_target_modules"])
-        return cls(**kwargs, extras=data)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a round-trippable, JSON-compatible configuration mapping."""
-        values = asdict(self)
-        extras = values.pop("extras")
-        values["lora_target_modules"] = list(values["lora_target_modules"])
-        return {**extras, **values}
-
-    def save_json(self, path: str | Path) -> None:
-        """Save this configuration as human-readable JSON."""
-        _save_json_mapping(self.to_dict(), path)
-
-    @classmethod
-    def from_json(cls, path: str | Path) -> TrainingConfig:
-        """Load and validate a configuration from JSON."""
-        return cls.from_mapping(_load_json_mapping(path))
-
-    def to_namespace(self, **overrides: Any) -> SimpleNamespace:
-        values = dict(self.extras)
-        values.update(asdict(self))
-        values.pop("extras", None)
-        values["lora_target_modules"] = list(values["lora_target_modules"])
-        values.update(overrides)
-        return SimpleNamespace(**values)
 
 
 def set_seed(seed: int) -> None:
@@ -605,6 +532,9 @@ class Trainer:
             global_step,
             metrics,
         )
+        # Persist the tokenizer, structural-token embeddings, architecture
+        # configuration, and framework metadata alongside the PEFT weights.
+        self.reranker.save_pretrained(checkpoint_dir / "final")
         return {"global_step": global_step, "metrics": metrics}
 
 
