@@ -1,0 +1,74 @@
+rerankers:
+  zero_shot:
+    params:
+      scoring: marker_logprob
+      prompt: marker
+      architecture: lft
+      model_name_or_path: meta-llama/Llama-3.2-3B-Instruct
+      adapter_path:
+      device: auto
+      torch_dtype: auto
+      max_length: 4096
+      max_new_tokens:
+      temperature: 0.0
+      num_beams: 1
+      max_history_items: 20
+      parser_repair: append_input_order
+
+  bootstrapping:
+    params:
+      scoring: marker_logprob
+      prompt: marker
+      architecture: lft
+      model_name_or_path: meta-llama/Llama-3.2-3B-Instruct
+      adapter_path:
+      device: auto
+      torch_dtype: auto
+      max_length: 4096
+      max_new_tokens:
+      temperature: 0.0
+      num_beams: 1
+      max_history_items: 20
+      parser_repair: append_input_order
+      num_samples: 3
+      seed: 42
+
+  sgs:
+    params:
+      scoring: marker_logprob
+      prompt: marker
+      architecture: lft
+      model_name_or_path: meta-llama/Llama-3.2-3B-Instruct
+      adapter_path:
+      device: auto
+      torch_dtype: auto
+      max_length: 4096
+      max_new_tokens:
+      temperature: 0.0
+      num_beams: 1
+      max_history_items: 20
+      parser_repair: append_input_order
+      selection_size: 1
+      seed: 42
+
+  stella:
+    params:
+      scoring: marker_logprob
+      prompt: marker
+      architecture: lft
+      model_name_or_path: meta-llama/Llama-3.2-3B-Instruct
+      adapter_path:
+      transition_matrix_path:
+      device: auto
+      torch_dtype: auto
+      max_length: 4096
+      max_new_tokens:
+      temperature: 0.0
+      num_beams: 1
+      max_history_items: 20
+      parser_repair: append_input_order
+      max_updates: 10
+      convergence_tolerance: 0.000001
+      convergence_steps: 3
+      minimum_information_gain: 0.000001
+      seed: 42

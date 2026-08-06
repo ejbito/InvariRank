@@ -1,0 +1,17 @@
+retrievers:
+  implicit_als:
+    params:
+      factors: 64
+      regularization: 0.01
+      iterations: 20
+      alpha: 40
+
+  lightgcn:
+    params:
+      embedding_dim: 64
+      num_layers: 3
+      learning_rate: 0.001
+      batch_size: 2048
+      epochs: 100
+      reg_weight: 0.0001
+      seed: 42

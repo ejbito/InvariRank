@@ -1,0 +1,23 @@
+datasets:
+  movielens:
+    name: movielens
+    raw_dir: data/raw/ml-32m
+    processed_dir: data/processed/ml-32m
+    min_rating: 4.0
+    min_user_interactions: 10
+    split: temporal_ratio
+    train_ratio: 0.7
+    val_ratio: 0.1
+
+  amazon_books:
+    name: amazon
+    category: Books
+    raw_dir: data/raw/amazon/Books
+    processed_dir: data/processed/amazon/Books
+    reviews_file: reviews.jsonl
+    metadata_file: metadata.jsonl
+    min_rating: 4.0
+    min_user_interactions: 3
+    split: temporal_ratio
+    train_ratio: 0.7
+    val_ratio: 0.1
