@@ -45,7 +45,7 @@ def candidate_id(item: Mapping[str, Any], fallback: int) -> str:
 
 def item_fields(item: Mapping[str, Any]) -> dict[str, Any]:
     title = item.get("title", item.get("name", ""))
-    year = item.get("year", "")
+    year = item.get("year", item.get("release_year", ""))
     rating = item.get("rating", "")
     genres = item.get("genres", item.get("categories", []))
     genre_text = ", ".join(map(str, genres)) if genres else ""

@@ -273,6 +273,7 @@ def make_span_item_block_mask(
 
     device = attention_2d.device
     allowed = torch.zeros((sequence_length, sequence_length), dtype=torch.bool, device=device)
+    covered_queries = torch.zeros(sequence_length, dtype=torch.bool, device=device)
     span_start, span_end = span_info.span_start, span_info.span_end
     span_length = span_end - span_start
     if span_causal:
@@ -281,10 +282,27 @@ def make_span_item_block_mask(
         )
     else:
         allowed[span_start:span_end, span_start:span_end] = True
+    covered_queries[span_start:span_end] = True
 
     for candidate_start, candidate_end in span_info.candidate_spans:
         allowed[candidate_start:candidate_end, span_start:span_end] = True
-        allowed[candidate_start:candidate_end, candidate_start:candidate_end] = True
+        candidate_length = candidate_end - candidate_start
+        allowed[candidate_start:candidate_end, candidate_start:candidate_end] = torch.tril(
+            torch.ones((candidate_length, candidate_length), device=device, dtype=torch.bool)
+        )
+        covered_queries[candidate_start:candidate_end] = True
+
+    # Prompt separators and optional wrapper tokens sit outside the explicit
+    # [SPAN]/[ITEM] regions. Give them a valid, causal context-only row so they
+    # cannot carry information from one candidate into the next and never
+    # produce an all-masked softmax row.
+    causal = torch.tril(torch.ones((sequence_length, sequence_length), device=device, dtype=torch.bool))
+    context_keys = torch.zeros(sequence_length, dtype=torch.bool, device=device)
+    context_keys[span_start:span_end] = True
+    orphan_queries = (~covered_queries) & attention_2d[0].bool()
+    for query in orphan_queries.nonzero(as_tuple=False).flatten().tolist():
+        allowed[query] = causal[query] & context_keys
+        allowed[query, query] = True
 
     allowed &= attention_2d[0].bool().unsqueeze(0)
     padding_positions = (~attention_2d[0].bool()).nonzero(as_tuple=False).flatten()
@@ -479,9 +497,16 @@ class MeanLogProbListwiseScorer:
         for row, span_info in enumerate(span_infos):
             scores = []
             for start, end in span_info.candidate_spans:
-                shifted_start = max(start - 1, 0)
-                shifted_end = max(end - 1, shifted_start + 1)
-                scores.append(token_log_probabilities[row, shifted_start:shifted_end].mean())
+                # Candidate spans include both structural markers. Score only
+                # the item-content tokens: logit position ``start`` predicts
+                # the first token after [ITEM], while ``end - 2`` predicts the
+                # final content token before [/ITEM]. This avoids scoring the
+                # [ITEM] marker from an inter-segment separator.
+                prediction_start = start
+                prediction_end = end - 2
+                if prediction_end <= prediction_start:
+                    raise ValueError("Candidate span contains no scoreable content tokens.")
+                scores.append(token_log_probabilities[row, prediction_start:prediction_end].mean())
             batch_scores.append(torch.stack(scores))
         return batch_scores
 
