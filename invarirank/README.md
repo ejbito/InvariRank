@@ -1,6 +1,6 @@
 # InvariRank Framework Guide
 
-[Repository overview](../README.md) | [Research guide](../research/README.md)
+[Repository overview](../README.md) | [Experiments guide](../experiments/README.md)
 
 The `invarirank` package provides two active capabilities:
 
@@ -10,9 +10,9 @@ The `invarirank` package provides two active capabilities:
 Position-bias analysis is a future downstream capability. The permutation suite executes rerankers and returns aligned
 evidence; it does not calculate position-bias, effectiveness, or paper-specific metrics.
 
-The published wheel contains this reusable package only. Dataset preparation, paper baselines, evaluation, experiment
-configs, and reproduction commands under `research/` are available from a repository checkout with the `research`
-dependency extra installed; they are not imported or installed by the core wheel.
+The core install contains this reusable package. Dataset preparation, retrieval, paper rerankers, evaluation,
+experiment configs, and reproduction commands live under `experiments/` and are documented in the
+[experiments guide](../experiments/README.md).
 
 ## Installation
 
@@ -26,6 +26,13 @@ Add training dependencies only when fine-tuning or loading PEFT adapters:
 
 ```bash
 pip install -e ".[train]"
+```
+
+Install the experiment workflow separately when you need datasets, retrievers, candidate export, paper rerankers,
+evaluation, and training:
+
+```bash
+pip install -e ".[train,experiments]"
 ```
 
 ## Ranking Data Contract
@@ -148,11 +155,11 @@ Every saved directory contains:
 
 ```text
 saved/invarirank/
-├── invarirank_config.json
-├── framework_metadata.json
-├── tokenizer_config.json
-├── tokenizer files
-└── model or adapter files
+|-- invarirank_config.json
+|-- framework_metadata.json
+|-- tokenizer_config.json
+|-- tokenizer files
+|-- model or adapter files
 ```
 
 For a PEFT-backed reranker, `save_pretrained` stores adapter files and records the required base-model name. Reloading
@@ -378,9 +385,9 @@ results = reranker.rank_many(samples, batch_size=8)
 
 Without `batch_order_fn`, batched ranking falls back to repeated `generate_order` calls.
 
-## Pairwise Ranking
+## Two-Candidate Ranking
 
-Two candidates use the normal API; no separate pairwise abstraction is required:
+Two candidates use the normal API; no separate pairwise reranking method is required:
 
 ```python
 pairwise_results = PermutationSuite(reranker).random(
@@ -450,20 +457,24 @@ Responsibilities remain deliberately small:
 
 | Module | Responsibility |
 | --- | --- |
-| `framework.py` | Public ranking contracts, configuration, reranker, and model lifecycle |
+| `contracts.py` | Public ranking data classes and reranker interface |
+| `config.py` | Inference/training configuration and JSON serialization |
+| `reranker.py` | InvariRank reranker and model lifecycle |
+| `framework.py` | Compatibility exports for the previous combined module |
 | `permutations.py` | Domain-neutral callable adapters and controlled input-order experiments |
 | `prompts.py` | Recommendation prompt and structural marker formatting |
 | `modeling.py` | Model loading, span extraction, attention, position IDs, and scoring |
 | `training.py` | LambdaRank, optional permutation consistency, LoRA, validation, and checkpoints |
 
-Candidate retrieval, paper baselines, generated-output prompts, paper metrics, and reproduction orchestration are not
-framework responsibilities; they are documented in the [research guide](../research/README.md).
+Candidate retrieval, paper reranking methods, generated-output prompts, paper metrics, and reproduction orchestration
+are not framework responsibilities; they are documented in the [experiments guide](../experiments/README.md).
 
 ## Metrics and Persistence Boundary
 
 The suite returns aligned ranking evidence. General effectiveness and stability metrics are not calculated here;
 paper-specific HR, NDCG, PPI, GPI, Kendall, Spearman, top-k overlap, position exposure, and query-level uncertainty
-remain in `research/`.
+remain in `experiments/`.
 
 Versioned experiment persistence is also not implemented yet. A future `PermutationRun` may record mode, seed,
 settings, sample identity, and results for later robustness or position-bias analysis without model access.
+
