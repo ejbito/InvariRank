@@ -8,7 +8,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from invarirank import RerankerConfig, Trainer, TrainingConfig
+from invarirank import InvariRankReranker, RerankerConfig, Trainer, TrainingConfig
 
 from experiments.reranking.history import load_user_histories
 from experiments.scripts.common import load_dataset_settings, processed_dir, reranker_training_dir
@@ -17,7 +17,11 @@ from experiments.utils.io import read_json
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train an LFT or InvariRank marker reranker adapter.")
-    parser.add_argument("--method", choices=["lft", "invarirank"], default="invarirank")
+    parser.add_argument(
+        "--method",
+        choices=["lft", "invarirank", "invarirank_setwise"],
+        default="invarirank",
+    )
     parser.add_argument("--train-candidates", required=True)
     parser.add_argument("--val-candidates", required=True)
     parser.add_argument("--dataset", default="movielens")
@@ -33,7 +37,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gradient-accumulation-steps", type=int, default=16)
     parser.add_argument("--train-num-permutations", type=int, default=1)
     parser.add_argument("--eval-num-permutations", type=int, default=10)
+    parser.add_argument("--lambda-rank", type=float, default=1.0)
+    parser.add_argument("--lambda-perm", type=float, default=0.0)
+    parser.add_argument("--permutation-loss", choices=["kl", "jeffreys"], default="kl")
     parser.add_argument("--max-history-items", type=int, default=20)
+    parser.add_argument("--interaction-dim", type=int, default=256)
+    parser.add_argument("--interaction-hidden-dim", type=int, default=512)
+    parser.add_argument("--interaction-dropout", type=float, default=0.1)
+    parser.add_argument("--interaction-score-scale", type=float, default=0.1)
     return parser.parse_args()
 
 
@@ -56,28 +67,69 @@ def main() -> None:
     train_samples = _samples_from_candidate_payload(train_payload, train_histories)
     val_samples = _samples_from_candidate_payload(val_payload, val_histories)
     output_dir = Path(args.output_dir) if args.output_dir else reranker_training_dir(args.dataset, args.method)
-    trainer = Trainer.from_pretrained(
-        args.model_name_or_path,
-        train_samples,
-        val_samples,
-        reranker_config=RerankerConfig.for_method(
-            args.method,
-            {
+    reranker_config = RerankerConfig.for_method(
+        args.method,
+        {
+            "device": args.device,
+            "dtype": args.torch_dtype,
+            "max_length": args.max_length,
+            "prompt_template": "invarirank",
+            "interaction_dim": args.interaction_dim,
+            "interaction_hidden_dim": args.interaction_hidden_dim,
+            "interaction_dropout": args.interaction_dropout,
+            "interaction_score_scale": args.interaction_score_scale,
+        },
+    )
+    training_config = TrainingConfig(
+        total_optimizer_steps=args.total_optimizer_steps,
+        learning_rate=args.learning_rate,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        train_num_permutations=args.train_num_permutations,
+        eval_num_permutations=args.eval_num_permutations,
+        lambda_rank=args.lambda_rank,
+        lambda_perm=args.lambda_perm,
+        permutation_loss=args.permutation_loss,
+    )
+    latest_checkpoint = output_dir / "checkpoints" / "latest"
+    previous_checkpoint = output_dir / "checkpoints" / ".latest_previous"
+    final_checkpoint = output_dir / "checkpoints" / "final"
+    if final_checkpoint.exists():
+        raise FileExistsError(
+            f"Training is already complete at {final_checkpoint}. Choose a new --output-dir to start another run."
+        )
+    resume_checkpoint = latest_checkpoint if latest_checkpoint.is_dir() else None
+    if resume_checkpoint is None and previous_checkpoint.is_dir():
+        resume_checkpoint = previous_checkpoint
+
+    if resume_checkpoint is not None:
+        print(f"Found latest completed epoch checkpoint at {resume_checkpoint}; resuming automatically.")
+        reranker = InvariRankReranker.from_pretrained(
+            resume_checkpoint,
+            config={
                 "device": args.device,
                 "dtype": args.torch_dtype,
                 "max_length": args.max_length,
-                "prompt_template": "invarirank",
             },
-        ),
-        training_config=TrainingConfig(
-            total_optimizer_steps=args.total_optimizer_steps,
-            learning_rate=args.learning_rate,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            train_num_permutations=args.train_num_permutations,
-            eval_num_permutations=args.eval_num_permutations,
-        ),
-    )
-    result = trainer.train(output_dir=output_dir)
+        )
+        if reranker.config.method != args.method:
+            raise ValueError(
+                f"Resume checkpoint architecture is {reranker.config.method!r}, but --method is {args.method!r}."
+            )
+        if reranker.config.model_name and reranker.config.model_name != args.model_name_or_path:
+            raise ValueError(
+                f"Resume checkpoint base model is {reranker.config.model_name!r}, but --model-name-or-path is "
+                f"{args.model_name_or_path!r}."
+            )
+        trainer = Trainer(reranker, train_samples, val_samples, training_config)
+    else:
+        trainer = Trainer.from_pretrained(
+            args.model_name_or_path,
+            train_samples,
+            val_samples,
+            reranker_config=reranker_config,
+            training_config=training_config,
+        )
+    result = trainer.train(output_dir=output_dir, resume_from_checkpoint=resume_checkpoint)
     print(f"Saved {args.method} adapter to {Path(output_dir) / 'checkpoints' / 'final'}")
     print(result)
 

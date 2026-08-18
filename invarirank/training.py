@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import shutil
 from collections.abc import Mapping
 from dataclasses import replace
 from numbers import Integral
@@ -20,6 +21,10 @@ from .modeling import (
 )
 from .prompts import build_prompt, candidate_id, extract_relevance_labels
 from .reranker import InvariRankReranker
+
+LATEST_CHECKPOINT_NAME = "latest"
+FINAL_CHECKPOINT_NAME = "final"
+TRAINER_STATE_NAME = "trainer.pt"
 
 
 def _metric_values(values: Any) -> list[float]:
@@ -83,11 +88,6 @@ def set_seed(seed: int) -> None:
             torch.cuda.manual_seed_all(seed)
     except ImportError:
         pass
-
-
-def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
-    with Path(path).open("r", encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle if line.strip()]
 
 
 def ensure_dir(path: str | Path) -> Path:
@@ -167,14 +167,6 @@ def listwise_collator(batch: list[dict[str, Any]]) -> dict[str, Any]:
     return batch[0]
 
 
-def filter_and_subsample(
-    samples: list[dict[str, Any]],
-    num_samples: int | None = None,
-) -> list[dict[str, Any]]:
-    valid = [sample for sample in samples if sample.get("candidates")]
-    return valid if num_samples is None else valid[: int(num_samples)]
-
-
 def lambda_rank_loss(scores: Any, relevance: Any, sigma: float = 1.0, eps: float = 1e-8):
     import torch
     import torch.nn.functional as functional
@@ -231,7 +223,7 @@ def permutation_invariance_loss(
         forward_kl = torch.sum(base_probability * (base_log - current_log), dim=-1)
         if mode == "kl":
             losses.append(forward_kl)
-        elif mode in {"symkl", "jeffreys"}:
+        elif mode == "jeffreys":
             reverse_kl = torch.sum(current_probability * (current_log - base_log), dim=-1)
             losses.append(forward_kl + reverse_kl)
         else:
@@ -369,20 +361,203 @@ def save_checkpoint(
     epoch: int,
     global_step: int,
     metrics: dict[str, float],
+    *,
+    reranker: InvariRankReranker | None = None,
+    training_config: Any | None = None,
+    micro_step: int = 0,
+    scaler: Any | None = None,
 ) -> None:
     import torch
 
     path = ensure_dir(Path(checkpoint_dir) / tag)
-    scorer.backbone.save_pretrained(path)
-    torch.save(
-        {
-            "epoch": epoch,
-            "global_step": global_step,
-            "optimizer": optimizer.state_dict(),
-            "metrics": metrics,
-        },
-        path / "trainer.pt",
+    if reranker is not None:
+        reranker.save_pretrained(path)
+    else:
+        scorer.backbone.save_pretrained(path)
+        interaction_model = getattr(scorer, "interaction_model", None)
+        if interaction_model is not None:
+            from safetensors.torch import save_file
+
+            from .config import INTERACTION_WEIGHTS_NAME
+
+            save_file(
+                {
+                    name: tensor.detach().cpu().contiguous()
+                    for name, tensor in interaction_model.state_dict().items()
+                },
+                str(path / INTERACTION_WEIGHTS_NAME),
+            )
+    state = {
+        "epoch": int(epoch),
+        "global_step": int(global_step),
+        "micro_step": int(micro_step),
+        "optimizer": optimizer.state_dict(),
+        "gradients": _capture_gradients(scorer),
+        "metrics": metrics,
+        "rng_state": _capture_rng_state(),
+    }
+    if training_config is not None:
+        state["training_signature"] = _training_resume_signature(training_config)
+    if scaler is not None:
+        state["scaler"] = scaler.state_dict()
+    torch.save(state, path / TRAINER_STATE_NAME)
+
+
+def _capture_gradients(scorer: Any) -> dict[str, Any]:
+    return {
+        name: parameter.grad.detach().cpu().clone()
+        for name, parameter in scorer.module.named_parameters()
+        if parameter.grad is not None
+    }
+
+
+def _restore_gradients(scorer: Any, gradients: Mapping[str, Any]) -> None:
+    parameters = dict(scorer.module.named_parameters())
+    unexpected = sorted(set(gradients) - set(parameters))
+    if unexpected:
+        raise ValueError(f"Checkpoint contains gradients for unknown parameters: {unexpected}")
+    for parameter in parameters.values():
+        parameter.grad = None
+    for name, gradient in gradients.items():
+        parameter = parameters[name]
+        parameter.grad = gradient.to(device=parameter.device, dtype=parameter.dtype)
+
+
+def _capture_rng_state() -> dict[str, Any]:
+    import torch
+
+    state: dict[str, Any] = {"python": random.getstate(), "torch": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    try:
+        import numpy as np
+
+        state["numpy"] = np.random.get_state()
+    except ImportError:
+        pass
+    return state
+
+
+def _restore_rng_state(state: Mapping[str, Any]) -> None:
+    import torch
+
+    if "python" in state:
+        random.setstate(state["python"])
+    if "torch" in state:
+        torch.set_rng_state(state["torch"])
+    if "cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda"])
+    if "numpy" in state:
+        try:
+            import numpy as np
+
+            np.random.set_state(state["numpy"])
+        except ImportError:
+            pass
+
+
+def _training_resume_signature(cfg: Any) -> dict[str, Any]:
+    keys = (
+        "seed",
+        "train_num_permutations",
+        "gradient_accumulation_steps",
+        "learning_rate",
+        "weight_decay",
+        "max_grad_norm",
+        "lambda_rank",
+        "lambda_perm",
+        "permutation_loss",
     )
+    return {key: getattr(cfg, key) for key in keys}
+
+
+def _load_training_state(
+    checkpoint: Path,
+    scorer: Any,
+    optimizer: Any,
+    cfg: Any,
+    scaler: Any | None = None,
+) -> tuple[int, int, int]:
+    import torch
+
+    state_path = checkpoint / TRAINER_STATE_NAME
+    if not state_path.is_file():
+        raise ValueError(f"Resume checkpoint is missing {TRAINER_STATE_NAME}: {checkpoint}")
+    state = torch.load(state_path, map_location="cpu", weights_only=False)
+    required = {"epoch", "global_step", "optimizer"}
+    missing = sorted(required - set(state))
+    if missing:
+        raise ValueError(f"Resume checkpoint {checkpoint} is missing trainer fields: {missing}")
+    saved_signature = state.get("training_signature")
+    current_signature = _training_resume_signature(cfg)
+    if saved_signature is not None and saved_signature != current_signature:
+        differences = {
+            key: {"saved": saved_signature.get(key), "requested": current_signature.get(key)}
+            for key in current_signature
+            if saved_signature.get(key) != current_signature.get(key)
+        }
+        raise ValueError(f"Training configuration does not match the latest checkpoint: {differences}")
+    optimizer.load_state_dict(state["optimizer"])
+    if scaler is not None and "scaler" in state:
+        scaler.load_state_dict(state["scaler"])
+    _restore_gradients(scorer, state.get("gradients", {}))
+    _restore_rng_state(state.get("rng_state", {}))
+    return int(state["epoch"]), int(state["global_step"]), int(state.get("micro_step", 0))
+
+
+def _save_checkpoint_atomically(
+    scorer: Any,
+    optimizer: Any,
+    checkpoint_dir: Path,
+    tag: str,
+    epoch: int,
+    global_step: int,
+    micro_step: int,
+    metrics: dict[str, float],
+    reranker: InvariRankReranker,
+    cfg: Any,
+    scaler: Any | None = None,
+) -> Path:
+    staging_tag = f".{tag}_staging"
+    backup = checkpoint_dir / f".{tag}_previous"
+    staging = checkpoint_dir / staging_tag
+    destination = checkpoint_dir / tag
+    _remove_checkpoint_directory(staging, checkpoint_dir)
+    save_checkpoint(
+        scorer,
+        optimizer,
+        checkpoint_dir,
+        staging_tag,
+        epoch,
+        global_step,
+        metrics,
+        reranker=reranker,
+        training_config=cfg,
+        micro_step=micro_step,
+        scaler=scaler,
+    )
+    _remove_checkpoint_directory(backup, checkpoint_dir)
+    if destination.exists():
+        destination.rename(backup)
+    try:
+        staging.rename(destination)
+    except Exception:
+        if backup.exists() and not destination.exists():
+            backup.rename(destination)
+        raise
+    _remove_checkpoint_directory(backup, checkpoint_dir)
+    return destination
+
+
+def _remove_checkpoint_directory(path: Path, checkpoint_dir: Path) -> None:
+    if not path.exists():
+        return
+    resolved_parent = path.resolve().parent
+    if resolved_parent != checkpoint_dir.resolve():
+        raise ValueError(f"Refusing to remove checkpoint path outside {checkpoint_dir}: {path}")
+    if not path.is_dir():
+        raise ValueError(f"Expected checkpoint path to be a directory: {path}")
+    shutil.rmtree(path)
 
 
 class Trainer:
@@ -435,7 +610,12 @@ class Trainer:
         reranker = InvariRankReranker(backbone, tokenizer, framework_config, device=device)
         return cls(reranker, resolved_train_samples, resolved_validation_samples, train_config)
 
-    def train(self, *, output_dir: str | Path) -> dict[str, Any]:
+    def train(
+        self,
+        *,
+        output_dir: str | Path,
+        resume_from_checkpoint: str | Path | None = None,
+    ) -> dict[str, Any]:
         import torch
         from torch.optim import AdamW
         from torch.utils.data import DataLoader
@@ -475,16 +655,50 @@ class Trainer:
         device = torch.device(cfg.device)
         scaler = torch.amp.GradScaler("cuda") if cfg.dtype == "float16" and device.type == "cuda" else None
 
+        start_epoch = 1
+        global_step = 0
+        micro_step = 0
+        if resume_from_checkpoint is not None:
+            resume_path = Path(resume_from_checkpoint)
+            completed_epoch, global_step, micro_step = _load_training_state(
+                resume_path,
+                self.reranker.scorer,
+                optimizer,
+                cfg,
+                scaler,
+            )
+            start_epoch = completed_epoch + 1
+            print(
+                f"Resuming from {resume_path} at epoch {start_epoch}, "
+                f"global step {global_step}, micro step {micro_step}."
+            )
+        elif (output / "training_log.jsonl").exists():
+            # A directory without a usable checkpoint is a fresh run. Avoid
+            # mixing logs from a previously failed pre-checkpoint attempt.
+            (output / "training_log.jsonl").write_text("", encoding="utf-8")
+
         with (output / "config.json").open("w", encoding="utf-8") as handle:
             json.dump({**combined, "output_dir": str(output)}, handle, indent=2)
         log_path = output / "training_log.jsonl"
-        global_step = 0
-        micro_step = 0
         maximum_epochs = cfg.num_epochs or 10**9
-        for epoch in range(1, int(maximum_epochs) + 1):
+        if cfg.total_optimizer_steps is not None and global_step >= int(cfg.total_optimizer_steps):
+            return self._finish(
+                validation_loader,
+                optimizer,
+                checkpoint_dir,
+                cfg,
+                max(0, start_epoch - 1),
+                global_step,
+                micro_step,
+                scaler,
+            )
+        last_log: dict[str, Any] = {}
+        last_completed_epoch = start_epoch - 1
+        for epoch in range(start_epoch, int(maximum_epochs) + 1):
             progress = tqdm(train_loader, desc=f"Training epoch {epoch}")
             for batch in progress:
                 log = train_step(batch, self.reranker.scorer, optimizer, scaler, cfg, micro_step)
+                last_log = log
                 micro_step += 1
                 if log["did_step"]:
                     global_step += 1
@@ -500,6 +714,10 @@ class Trainer:
                             epoch,
                             global_step,
                             metrics,
+                            reranker=self.reranker,
+                            training_config=cfg,
+                            micro_step=micro_step,
+                            scaler=scaler,
                         )
                     if cfg.total_optimizer_steps is not None and global_step >= int(cfg.total_optimizer_steps):
                         return self._finish(
@@ -509,9 +727,40 @@ class Trainer:
                             cfg,
                             epoch,
                             global_step,
+                            micro_step,
+                            scaler,
                         )
                 progress.set_postfix({"step": global_step, "loss": f"{log['loss_total']:.4f}"})
-        return self._finish(validation_loader, optimizer, checkpoint_dir, cfg, epoch, global_step)
+            latest_metrics = {
+                key: float(value)
+                for key, value in last_log.items()
+                if key.startswith("loss_") and isinstance(value, (int, float))
+            }
+            latest = _save_checkpoint_atomically(
+                self.reranker.scorer,
+                optimizer,
+                checkpoint_dir,
+                LATEST_CHECKPOINT_NAME,
+                epoch,
+                global_step,
+                micro_step,
+                latest_metrics,
+                self.reranker,
+                cfg,
+                scaler,
+            )
+            last_completed_epoch = epoch
+            print(f"Saved completed epoch {epoch} checkpoint to {latest}")
+        return self._finish(
+            validation_loader,
+            optimizer,
+            checkpoint_dir,
+            cfg,
+            last_completed_epoch,
+            global_step,
+            micro_step,
+            scaler,
+        )
 
     def _finish(
         self,
@@ -521,43 +770,28 @@ class Trainer:
         cfg: Any,
         epoch: int,
         global_step: int,
+        micro_step: int,
+        scaler: Any | None,
     ) -> dict[str, Any]:
         metrics = evaluate_validation(validation_loader, self.reranker.scorer, cfg)
-        save_checkpoint(
+        final_path = _save_checkpoint_atomically(
             self.reranker.scorer,
             optimizer,
             checkpoint_dir,
-            "final",
+            FINAL_CHECKPOINT_NAME,
             epoch,
             global_step,
+            micro_step,
             metrics,
+            self.reranker,
+            cfg,
+            scaler,
         )
-        # Persist the tokenizer, structural-token embeddings, architecture
-        # configuration, and framework metadata alongside the PEFT weights.
-        self.reranker.save_pretrained(checkpoint_dir / "final")
+        _remove_checkpoint_directory(checkpoint_dir / LATEST_CHECKPOINT_NAME, checkpoint_dir)
+        _remove_checkpoint_directory(checkpoint_dir / f".{LATEST_CHECKPOINT_NAME}_previous", checkpoint_dir)
+        _remove_checkpoint_directory(checkpoint_dir / f".{LATEST_CHECKPOINT_NAME}_staging", checkpoint_dir)
+        print(f"Saved final checkpoint to {final_path}; removed the latest epoch checkpoint.")
         return {"global_step": global_step, "metrics": metrics}
-
-
-def run_training_pipeline(cfg: Any) -> dict[str, Any]:
-    required = ["model_name", "train_path", "val_path", "run_dir"]
-    missing = [name for name in required if not getattr(cfg, name, None)]
-    if missing:
-        raise ValueError(f"Missing required config field(s): {', '.join(missing)}")
-    train_samples = filter_and_subsample(
-        load_jsonl(cfg.train_path),
-        getattr(cfg, "train_max_samples", None),
-    )
-    validation_samples = filter_and_subsample(
-        load_jsonl(cfg.val_path),
-        getattr(cfg, "val_max_samples", None),
-    )
-    return Trainer.from_pretrained(
-        cfg.model_name,
-        train_samples,
-        validation_samples,
-        reranker_config=RerankerConfig.from_mapping(vars(cfg)),
-        training_config=TrainingConfig.from_mapping(vars(cfg)),
-    ).train(output_dir=cfg.run_dir)
 
 
 def _coerce_training_config(config: TrainingConfig | Mapping[str, Any] | None) -> TrainingConfig:
@@ -607,11 +841,9 @@ __all__ = [
     "Trainer",
     "TrainingConfig",
     "evaluate_validation",
-    "filter_and_subsample",
     "lambda_rank_loss",
     "listwise_collator",
     "permutation_invariance_loss",
-    "run_training_pipeline",
     "sample_permutation",
     "save_checkpoint",
     "train_step",
