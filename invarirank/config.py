@@ -7,10 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-FINE_TUNED_METHODS = frozenset({"lft", "invarirank"})
+FINE_TUNED_METHODS = frozenset({"lft", "invarirank", "invarirank_setwise"})
 INVARIRANK_CONFIG_NAME = "invarirank_config.json"
 FRAMEWORK_METADATA_NAME = "framework_metadata.json"
-SAVED_FORMAT_VERSION = 1
+INTERACTION_WEIGHTS_NAME = "interaction_model.safetensors"
+SAVED_FORMAT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,12 @@ class RerankerConfig:
     attention_mask: str = "block"
     position_ids: str = "shared"
     span_causal: bool = True
+    interaction: str = "none"
+    interaction_dim: int = 256
+    interaction_hidden_dim: int = 512
+    interaction_dropout: float = 0.1
+    interaction_score_scale: float = 0.1
+    candidate_pooling: str = "mean"
     extras: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -41,6 +48,18 @@ class RerankerConfig:
             raise ValueError(f"Unsupported attention_mask: {self.attention_mask}")
         if self.position_ids not in {"shared", "standard"}:
             raise ValueError(f"Unsupported position_ids: {self.position_ids}")
+        if self.interaction not in {"none", "relational"}:
+            raise ValueError(f"Unsupported interaction: {self.interaction}")
+        if self.interaction != "none" and (self.attention_mask, self.position_ids) != ("block", "shared"):
+            raise ValueError("Candidate interaction requires attention_mask='block' and position_ids='shared'.")
+        if self.interaction_dim < 1 or self.interaction_hidden_dim < 1:
+            raise ValueError("interaction_dim and interaction_hidden_dim must be positive.")
+        if not 0.0 <= self.interaction_dropout < 1.0:
+            raise ValueError("interaction_dropout must be in [0, 1).")
+        if self.interaction_score_scale < 0:
+            raise ValueError("interaction_score_scale must be non-negative.")
+        if self.candidate_pooling != "mean":
+            raise ValueError("candidate_pooling currently supports only 'mean'.")
         structural_tokens = (
             self.span_start_token,
             self.span_end_token,
@@ -62,16 +81,17 @@ class RerankerConfig:
         return cls(**kwargs, extras=data)
 
     @classmethod
-    def for_method(cls, method: str, values: Mapping[str, Any]) -> RerankerConfig:
+    def for_method(cls, method: str, values: Mapping[str, Any] | None = None) -> RerankerConfig:
         """Build one of the framework-owned fine-tuned reranker presets."""
         architectures = {
-            "lft": ("causal", "standard"),
-            "invarirank": ("block", "shared"),
+            "lft": ("causal", "standard", "none"),
+            "invarirank": ("block", "shared", "none"),
+            "invarirank_setwise": ("block", "shared", "relational"),
         }
         if method not in architectures:
             raise ValueError(f"Unsupported framework method: {method}. Expected one of {sorted(architectures)}")
-        resolved = dict(values)
-        resolved["attention_mask"], resolved["position_ids"] = architectures[method]
+        resolved = dict(values or {})
+        resolved["attention_mask"], resolved["position_ids"], resolved["interaction"] = architectures[method]
         resolved["prompt_template"] = "invarirank"
         return cls.from_mapping(resolved)
 
@@ -80,6 +100,10 @@ class RerankerConfig:
         values = asdict(self)
         extras = values.pop("extras")
         return {**extras, **values}
+
+    @property
+    def method(self) -> str:
+        return method_from_config(self)
 
     def save_json(self, path: str | Path) -> None:
         """Save this configuration as human-readable JSON."""
@@ -129,9 +153,15 @@ class TrainingConfig:
             raise ValueError("gradient_accumulation_steps must be at least one.")
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be greater than zero.")
+        if self.lambda_rank < 0 or self.lambda_perm < 0:
+            raise ValueError("lambda_rank and lambda_perm must be non-negative.")
+        if self.lambda_rank == 0 and self.lambda_perm == 0:
+            raise ValueError("At least one of lambda_rank or lambda_perm must be greater than zero.")
+        if self.lambda_perm > 0 and self.train_num_permutations < 2:
+            raise ValueError("lambda_perm requires train_num_permutations to be at least two.")
         if self.num_epochs is None and self.total_optimizer_steps is None:
             raise ValueError("Set num_epochs or total_optimizer_steps.")
-        if self.permutation_loss not in {"kl", "symkl", "jeffreys"}:
+        if self.permutation_loss not in {"kl", "jeffreys"}:
             raise ValueError(f"Unsupported permutation_loss: {self.permutation_loss}")
 
     @classmethod
@@ -189,11 +219,30 @@ def _load_json_mapping(path: str | Path) -> dict[str, Any]:
     return values
 
 
+def method_from_config(config: Any) -> str:
+    signature = (
+        str(getattr(config, "attention_mask", "causal")),
+        str(getattr(config, "position_ids", "standard")),
+        str(getattr(config, "interaction", "none")),
+    )
+    methods = {
+        ("causal", "standard", "none"): "lft",
+        ("block", "shared", "none"): "invarirank",
+        ("block", "shared", "relational"): "invarirank_setwise",
+    }
+    try:
+        return methods[signature]
+    except KeyError as exc:
+        raise ValueError(f"Configuration does not correspond to a supported reranker method: {signature}") from exc
+
+
 __all__ = [
     "FINE_TUNED_METHODS",
     "FRAMEWORK_METADATA_NAME",
+    "INTERACTION_WEIGHTS_NAME",
     "INVARIRANK_CONFIG_NAME",
     "RerankerConfig",
     "SAVED_FORMAT_VERSION",
     "TrainingConfig",
+    "method_from_config",
 ]

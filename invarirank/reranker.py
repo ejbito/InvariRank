@@ -7,6 +7,7 @@ from typing import Any
 
 from .config import (
     FRAMEWORK_METADATA_NAME,
+    INTERACTION_WEIGHTS_NAME,
     INVARIRANK_CONFIG_NAME,
     SAVED_FORMAT_VERSION,
     RerankerConfig,
@@ -61,6 +62,11 @@ class InvariRankReranker(Reranker):
             return cls._from_saved_directory(model_path, config=config)
 
         framework_config = _coerce_config(config)
+        if framework_config.interaction != "none":
+            raise ValueError(
+                "Interaction-aware variants must be loaded from a complete saved InvariRank directory containing "
+                "interaction weights. Use Trainer.from_pretrained(...) to initialize a new trainable variant."
+            )
         cfg = framework_config.to_namespace(
             model_name=str(model_name),
             adapter_path=adapter_path if adapter_path is not None else framework_config.adapter_path,
@@ -102,7 +108,9 @@ class InvariRankReranker(Reranker):
         if resolved_values.get("model_name") is None:
             resolved_values["model_name"] = saved_config.model_name
         resolved_config = RerankerConfig.from_mapping(resolved_values)
-        return cls(backbone, tokenizer, resolved_config, device=device)
+        reranker = cls(backbone, tokenizer, resolved_config, device=device)
+        reranker._load_interaction_weights(path)
+        return reranker
 
     def save_pretrained(self, path: str | Path) -> None:
         """Save model or adapter weights, tokenizer, configuration, and format metadata."""
@@ -125,6 +133,20 @@ class InvariRankReranker(Reranker):
         backbone_save(output)
         tokenizer_save(output)
 
+        interaction_model = self.scorer.interaction_model
+        interaction_path = output / INTERACTION_WEIGHTS_NAME
+        if interaction_model is None:
+            if interaction_path.exists():
+                interaction_path.unlink()
+        else:
+            from safetensors.torch import save_file
+
+            state = {
+                name: tensor.detach().cpu().contiguous()
+                for name, tensor in interaction_model.state_dict().items()
+            }
+            save_file(state, str(interaction_path))
+
         config_values = self.config.to_dict()
         for runtime_key in ("base_model_name", "checkpoint_path", "tokenizer_name"):
             config_values.pop(runtime_key, None)
@@ -144,6 +166,25 @@ class InvariRankReranker(Reranker):
             output / FRAMEWORK_METADATA_NAME,
         )
         _validate_saved_directory(output)
+
+    def _load_interaction_weights(self, path: Path) -> None:
+        interaction_model = self.scorer.interaction_model
+        weights_path = path / INTERACTION_WEIGHTS_NAME
+        if interaction_model is None:
+            if weights_path.is_file():
+                raise ValueError(
+                    f"Saved artifact {path} contains interaction weights but config interaction is 'none'."
+                )
+            return
+        if not weights_path.is_file():
+            raise ValueError(f"Saved interaction-aware InvariRank artifact is missing: {INTERACTION_WEIGHTS_NAME}")
+        from safetensors.torch import load_file
+
+        state = load_file(str(weights_path), device="cpu")
+        try:
+            interaction_model.load_state_dict(state, strict=True)
+        except RuntimeError as exc:
+            raise ValueError(f"Interaction weights are incompatible with the saved configuration in {path}.") from exc
 
     def rank(
         self,
@@ -201,7 +242,14 @@ class InvariRankReranker(Reranker):
                     )
                 ]
             results.extend(
-                _build_ranking_result(ranking_sample, resolved, scores, prompt_text=prompt)
+                _build_ranking_result(
+                    ranking_sample,
+                    resolved,
+                    scores,
+                    prompt_text=prompt,
+                    method=self.config.method,
+                    interaction=self.config.interaction,
+                )
                 for (ranking_sample, resolved, prompt), scores in zip(chunk, score_batch, strict=True)
             )
         return results
@@ -235,10 +283,11 @@ def _validate_saved_directory(path: Path) -> tuple[RerankerConfig, dict[str, Any
     metadata = _load_json_mapping(path / FRAMEWORK_METADATA_NAME)
     if metadata.get("framework") != "invarirank":
         raise ValueError(f"Incompatible framework metadata in {path}: expected framework 'invarirank'.")
-    if metadata.get("format_version") != SAVED_FORMAT_VERSION:
+    format_version = metadata.get("format_version")
+    if format_version not in {1, SAVED_FORMAT_VERSION}:
         raise ValueError(
             f"Unsupported saved InvariRank format version in {path}: {metadata.get('format_version')!r}; "
-            f"expected {SAVED_FORMAT_VERSION}."
+            f"expected one of {[1, SAVED_FORMAT_VERSION]}."
         )
     if not isinstance(metadata.get("package_version"), str) or not metadata["package_version"]:
         raise ValueError(f"Saved InvariRank metadata is missing package_version: {path}")
@@ -247,6 +296,17 @@ def _validate_saved_directory(path: Path) -> tuple[RerankerConfig, dict[str, Any
         raise ValueError(f"Unsupported saved InvariRank artifact type in {path}: {artifact_type!r}.")
 
     saved_config = RerankerConfig.from_json(path / INVARIRANK_CONFIG_NAME)
+    interaction_path = path / INTERACTION_WEIGHTS_NAME
+    if format_version == 1 and saved_config.interaction != "none":
+        raise ValueError("Saved format version 1 does not support interaction-aware InvariRank artifacts.")
+    if saved_config.interaction == "none" and interaction_path.is_file():
+        raise ValueError(
+            f"Saved artifact {path} contains {INTERACTION_WEIGHTS_NAME} but config interaction is 'none'."
+        )
+    if saved_config.interaction != "none" and not interaction_path.is_file():
+        raise ValueError(
+            f"Incomplete interaction-aware InvariRank artifact {path}; missing: {INTERACTION_WEIGHTS_NAME}"
+        )
     if artifact_type == "adapter":
         if not (path / "adapter_config.json").is_file():
             raise ValueError(f"Incomplete saved InvariRank adapter directory {path}; missing: adapter_config.json")
@@ -350,6 +410,8 @@ def _build_ranking_result(
     scores: Any,
     *,
     prompt_text: str | None = None,
+    method: str = "invarirank",
+    interaction: str = "none",
 ) -> RankingResult:
     from .prompts import candidate_id
 
@@ -379,7 +441,8 @@ def _build_ranking_result(
         permutation=tuple(permutation),
         split=sample.split,
         metadata={
-            "method": "invarirank",
+            "method": method,
+            "interaction": interaction,
             "output_backend": "span_logprob",
             "prompt_family": "invarirank_marker",
             "prompt_version": "invarirank-marker-v1",

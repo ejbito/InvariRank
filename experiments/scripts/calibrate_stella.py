@@ -18,6 +18,7 @@ from experiments.reranking.scoring import ScoringConfig, load_scorer
 from experiments.scripts.common import load_dataset_settings, processed_dir
 from experiments.utils.io import ensure_dir, read_json, write_json
 from experiments.utils.progress import progress
+from invarirank import FINE_TUNED_METHODS, method_from_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter-path", default=None)
     parser.add_argument("--scoring", choices=["generation", "marker_logprob"], default="marker_logprob")
     parser.add_argument("--prompt", choices=["rankgpt", "marker"], default="marker")
-    parser.add_argument("--architecture", choices=["lft", "invarirank"], default="lft")
+    parser.add_argument("--architecture", choices=sorted(FINE_TUNED_METHODS), default="lft")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--torch-dtype", default="auto")
     parser.add_argument("--max-length", type=int, default=4096)
@@ -229,13 +230,8 @@ def _resolved_architecture(scorer: Any, requested: str) -> str:
     scorer_config = getattr(scorer, "config", None)
     if scorer_config is None:
         return requested
-    if (getattr(scorer_config, "attention_mask", None), getattr(scorer_config, "position_ids", None)) == (
-        "block",
-        "shared",
-    ):
-        return "invarirank"
-    if hasattr(scorer_config, "attention_mask") or hasattr(scorer_config, "position_ids"):
-        return "lft"
+    if hasattr(scorer_config, "attention_mask") and hasattr(scorer_config, "position_ids"):
+        return method_from_config(scorer_config)
     return requested
 
 

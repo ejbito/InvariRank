@@ -3,6 +3,7 @@ transformers>=4.45
 peft>=0.12
 accelerate>=0.33
 numpy>=1.26
+safetensors>=0.4
 scipy>=1.9
 PyYAML>=6.0
 tqdm>=4.66

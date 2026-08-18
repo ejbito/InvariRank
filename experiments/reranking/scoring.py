@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from invarirank import InvariRankReranker, RerankerConfig
+from invarirank import FINE_TUNED_METHODS, InvariRankReranker, RerankerConfig
 from invarirank.contracts import RankedItem, RankingResult, RankingSample, Reranker
 
 from experiments.reranking.parsers import parse_rankgpt_output
@@ -47,8 +47,8 @@ class ScoringConfig:
             raise ValueError("scoring='generation' requires prompt='rankgpt'.")
         if self.scoring == "marker_logprob" and self.prompt != "marker":
             raise ValueError("scoring='marker_logprob' requires prompt='marker'.")
-        if self.architecture not in {"lft", "invarirank"}:
-            raise ValueError("architecture must be either 'lft' or 'invarirank'.")
+        if self.architecture not in FINE_TUNED_METHODS:
+            raise ValueError(f"architecture must be one of {sorted(FINE_TUNED_METHODS)}.")
 
 
 def load_scorer(config: ScoringConfig) -> Reranker:

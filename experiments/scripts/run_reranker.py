@@ -17,6 +17,7 @@ from experiments.reranking.registry import get_reranker_class
 from experiments.scripts.common import load_dataset_settings, processed_dir
 from experiments.utils.io import ensure_dir, read_json, read_yaml, write_json
 from experiments.utils.progress import progress
+from invarirank import FINE_TUNED_METHODS, RerankerConfig
 
 PAPER_RERANKERS = ["zero_shot", "bootstrapping", "stella", "sgs"]
 SCORING_OPTIONS = ["generation", "marker_logprob"]
@@ -50,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retriever-artifact-dir", default="artifacts/retrievers")
     parser.add_argument("--scoring", choices=SCORING_OPTIONS, default=None)
     parser.add_argument("--prompt", choices=PROMPT_OPTIONS, default=None)
-    parser.add_argument("--architecture", choices=["lft", "invarirank"], default=None)
+    parser.add_argument("--architecture", choices=sorted(FINE_TUNED_METHODS), default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--torch-dtype", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
@@ -438,12 +439,7 @@ def _effective_architecture(params: dict[str, Any]) -> str:
     config_path = Path(adapter_path) / "invarirank_config.json"
     if not config_path.is_file():
         return requested
-    config = read_json(config_path)
-    return (
-        "invarirank"
-        if (config.get("attention_mask"), config.get("position_ids")) == ("block", "shared")
-        else "lft"
-    )
+    return RerankerConfig.from_json(config_path).method
 
 
 def _input_candidate_ids(user_record: dict[str, Any]) -> list[str]:
@@ -463,7 +459,7 @@ def _default_output_path(
     scoring = params.get("scoring", "generation")
     suffix = f"{args.reranker}_{scoring}"
     if scoring == "marker_logprob":
-        suffix = f"{suffix}_{params.get('architecture', 'invarirank')}"
+        suffix = f"{suffix}_{_effective_architecture(params)}"
     if args.shuffle_candidates or args.num_permutations > 1:
         suffix = f"{suffix}_perm{args.num_permutations}"
     return Path("artifacts/reranking") / args.dataset / retriever_name / candidate_path.stem / f"{suffix}.json"

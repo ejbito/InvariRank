@@ -4,6 +4,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from invarirank import method_from_config
 from invarirank.contracts import Reranker
 
 from experiments.reranking.base import BaseReranker
@@ -83,11 +84,7 @@ class LLMReranker(BaseReranker):
         )
         scorer_config = getattr(scorer, "config", None)
         if scorer_config is not None:
-            architecture = (
-                "invarirank"
-                if (scorer_config.attention_mask, scorer_config.position_ids) == ("block", "shared")
-                else "lft"
-            )
+            architecture = method_from_config(scorer_config)
         self.architecture = architecture
         self.runtime_info = {
             "scoring": scoring,

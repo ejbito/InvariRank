@@ -9,6 +9,7 @@ description = "Position-invariant listwise reranking for LLM-based recommendatio
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.26",
+    "safetensors>=0.4",
     "torch>=2.3",
     "tqdm>=4.66",
     "transformers>=4.45",

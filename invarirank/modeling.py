@@ -176,6 +176,15 @@ def model_dtype(model: Any):
     return next(model.parameters()).dtype
 
 
+def model_hidden_size(model: Any) -> int:
+    config = getattr(model, "config", None)
+    for name in ("hidden_size", "n_embd", "d_model"):
+        value = getattr(config, name, None)
+        if value is not None and int(value) > 0:
+            return int(value)
+    raise ValueError("Could not determine the causal language model hidden size for candidate interaction.")
+
+
 @dataclass(frozen=True)
 class SpanInfo:
     span_start: int
@@ -401,11 +410,15 @@ class MeanLogProbListwiseScorer:
     def __init__(self, backbone: Any, tokenizer: Any, cfg: Any):
         import torch.nn as nn
 
+        from .interactions import build_candidate_interaction
+
         class _Scorer(nn.Module):
             def __init__(self, outer: MeanLogProbListwiseScorer):
                 super().__init__()
                 self.outer = outer
                 self.backbone = outer.backbone
+                if outer.interaction_model is not None:
+                    self.interaction_model = outer.interaction_model
 
             def forward(self, input_ids: Any, attention_mask: Any):
                 return self.outer(input_ids, attention_mask)
@@ -414,6 +427,9 @@ class MeanLogProbListwiseScorer:
         self.tokenizer = tokenizer
         self.cfg = cfg
         self.span_extractor = SpanExtractor(tokenizer, cfg)
+        self.interaction_model = build_candidate_interaction(cfg, model_hidden_size(backbone))
+        if self.interaction_model is not None:
+            self.interaction_model.to(dtype=model_dtype(backbone))
         self.module = _Scorer(self)
 
     def to(self, *args: Any, **kwargs: Any):
@@ -468,12 +484,16 @@ class MeanLogProbListwiseScorer:
         dtype = next(self.backbone.parameters()).dtype
         attention = build_batched_attention_mask(attention_mask, span_infos, self.cfg, dtype)
         position_ids = build_batched_position_ids(input_ids, attention_mask, span_infos, self.cfg)
-        outputs = self.backbone(
-            input_ids=input_ids,
-            attention_mask=attention,
-            position_ids=position_ids,
-            use_cache=False,
-        )
+        interaction_enabled = self.interaction_model is not None
+        forward_kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention,
+            "position_ids": position_ids,
+            "use_cache": False,
+        }
+        if interaction_enabled:
+            forward_kwargs["output_hidden_states"] = True
+        outputs = self.backbone(**forward_kwargs)
         logits = getattr(outputs, "logits", None)
         if logits is None:
             raise TypeError(
@@ -493,9 +513,25 @@ class MeanLogProbListwiseScorer:
             index=labels.unsqueeze(-1),
         ).squeeze(-1)
 
+        final_hidden = None
+        if interaction_enabled:
+            hidden_states = getattr(outputs, "hidden_states", None)
+            if not hidden_states:
+                raise TypeError(
+                    "Interaction-aware InvariRank requires the backbone to return hidden_states when "
+                    "output_hidden_states=True."
+                )
+            final_hidden = hidden_states[-1]
+            if final_hidden.ndim != 3 or final_hidden.shape[:2] != input_ids.shape:
+                raise ValueError(
+                    "Unsupported hidden-state output: final hidden states must have shape "
+                    "[batch, sequence_length, hidden_size]."
+                )
+
         batch_scores = []
         for row, span_info in enumerate(span_infos):
             scores = []
+            representations = []
             for start, end in span_info.candidate_spans:
                 # Candidate spans include both structural markers. Score only
                 # the item-content tokens: logit position ``start`` predicts
@@ -507,7 +543,20 @@ class MeanLogProbListwiseScorer:
                 if prediction_end <= prediction_start:
                     raise ValueError("Candidate span contains no scoreable content tokens.")
                 scores.append(token_log_probabilities[row, prediction_start:prediction_end].mean())
-            batch_scores.append(torch.stack(scores))
+                if final_hidden is not None:
+                    content_start = start + 1
+                    content_end = end - 1
+                    if content_end <= content_start:
+                        raise ValueError("Candidate span contains no content hidden states to pool.")
+                    representations.append(final_hidden[row, content_start:content_end].mean(dim=0))
+            base_scores = torch.stack(scores)
+            if self.interaction_model is None:
+                batch_scores.append(base_scores)
+            else:
+                interaction = self.interaction_model(torch.stack(representations), base_scores)
+                if interaction.correction.shape != base_scores.shape:
+                    raise ValueError("Interaction module returned an invalid candidate correction shape.")
+                batch_scores.append(base_scores + interaction.correction.float())
         return batch_scores
 
 
@@ -625,6 +674,7 @@ __all__ = [
     "load_tokenizer",
     "make_4d_causal_mask_from_2d",
     "make_shared_position_ids",
+    "model_hidden_size",
     "make_span_item_block_mask",
     "model_dtype",
     "parse_attention_mask_mode",
