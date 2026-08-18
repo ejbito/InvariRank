@@ -147,6 +147,3 @@ class StochasticGreedySelection(Reranker):
                 )
             )
         return outputs
-
-
-SequentialGreedySelection = StochasticGreedySelection

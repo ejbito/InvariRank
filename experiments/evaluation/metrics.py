@@ -16,16 +16,6 @@ def evaluate_at_k(
         f"ndcg@{k}": ndcg_at_k(recommendations, ground_truth, k),
         f"mrr@{k}": mrr_at_k(recommendations, ground_truth, k),
     }
-
-
-def evaluate_reranking_at_k(
-    recommendations: Mapping[Any, Sequence[Any]],
-    ground_truth: Mapping[Any, Iterable[Any]],
-    k: int,
-) -> dict[str, float]:
-    return evaluate_at_k(recommendations, ground_truth, k)
-
-
 def hit_rate_at_k(
     recommendations: Mapping[Any, Sequence[Any]],
     ground_truth: Mapping[Any, Iterable[Any]],

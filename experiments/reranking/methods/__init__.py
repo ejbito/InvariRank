@@ -6,7 +6,7 @@ from experiments.reranking.methods.facade import (
     METHOD_SET,
     LLMReranker,
 )
-from experiments.reranking.methods.sgs import SequentialGreedySelection, StochasticGreedySelection
+from experiments.reranking.methods.sgs import StochasticGreedySelection
 from experiments.reranking.methods.stella import Stella, StellaCalibrator
 from experiments.reranking.methods.zero_shot import ZeroShot
 
@@ -15,7 +15,6 @@ __all__ = [
     "METHOD_SET",
     "Bootstrapping",
     "LLMReranker",
-    "SequentialGreedySelection",
     "Stella",
     "StellaCalibrator",
     "StochasticGreedySelection",

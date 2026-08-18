@@ -125,15 +125,6 @@ def _llm_item_record(
     ordered = {"item_id": record.pop("item_id")}
     ordered.update(record)
     return ordered
-
-
-def make_llm_item_record(
-    internal_item_id: int,
-    metadata: Mapping[str, Any],
-) -> dict[str, Any]:
-    return _llm_item_record(internal_item_id, metadata)
-
-
 def _display_item_id(
     internal_item_id: int,
     item_metadata: Mapping[int, Mapping[str, Any]],

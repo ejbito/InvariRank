@@ -4,7 +4,6 @@ from experiments.reranking.base import BaseReranker
 from experiments.reranking.methods import (
     Bootstrapping,
     LLMReranker,
-    SequentialGreedySelection,
     Stella,
     StellaCalibrator,
     StochasticGreedySelection,
@@ -16,7 +15,6 @@ __all__ = [
     "BaseReranker",
     "Bootstrapping",
     "LLMReranker",
-    "SequentialGreedySelection",
     "Stella",
     "StellaCalibrator",
     "StochasticGreedySelection",
