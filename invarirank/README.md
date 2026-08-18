@@ -7,6 +7,10 @@ The `invarirank` package provides two active capabilities:
 1. Recommendation-specific InvariRank inference and training.
 2. Domain-neutral controlled input-order experiments for compatible rerankers.
 
+InvariRank is available as the original pointwise, candidate-separable model (`invarirank`) and Setwise InvariRank
+(`invarirank_setwise`). The setwise architecture adds a ranking-aware relational candidate interaction while remaining
+permutation equivariant.
+
 Position-bias analysis is a future downstream capability. The permutation suite executes rerankers and returns aligned
 evidence; it does not calculate position-bias, effectiveness, or paper-specific metrics.
 
@@ -157,6 +161,7 @@ Every saved directory contains:
 saved/invarirank/
 |-- invarirank_config.json
 |-- framework_metadata.json
+|-- interaction_model.safetensors  # interaction-aware variants only
 |-- tokenizer_config.json
 |-- tokenizer files
 |-- model or adapter files
@@ -168,7 +173,7 @@ backbone, the directory stores the complete model through its Hugging Face `save
 
 `framework_metadata.json` records the format version, package version, artifact type, and base-model identity. Loading
 fails early for missing tokenizer/configuration files, unsupported format versions or artifact types, invalid
-framework metadata, missing adapter provenance, and base-model mismatches.
+framework metadata, missing adapter provenance, base-model mismatches, and missing or incompatible interaction weights.
 
 ## Framework Training
 
@@ -189,8 +194,19 @@ trainer = Trainer(
 trainer.train(output_dir="runs/train/my_invarirank_model")
 ```
 
+Choose Setwise InvariRank with `RerankerConfig.for_method("invarirank_setwise")`. The optimizer includes both
+adapter/backbone and relational-interaction parameters. Final and intermediate
+checkpoints use the complete saved-model layout above; load an interaction-aware model from that directory so its
+trained interaction weights are restored.
+
 Candidate labels are permuted with their original candidate indices, preserving score/label alignment in every
 LambdaRank and validation pass.
+
+`Trainer.train(..., resume_from_checkpoint=...)` restores a complete epoch checkpoint, including model or adapter,
+interaction weights, optimizer state, partially accumulated gradients, global and micro steps, mixed-precision scaler,
+and Python, NumPy, PyTorch, and CUDA random states. The experiment training command manages this automatically through
+`checkpoints/latest`: it replaces that checkpoint after each completed epoch, resumes it when the same command is
+re-run, and removes it only after `checkpoints/final` has been written successfully.
 
 ## PermutationSuite
 
@@ -449,7 +465,10 @@ RankingSample
   -> decoder-only causal language model
   -> block candidate attention
   -> shared candidate position IDs
-  -> marker-span mean log probabilities
+  -> marker-span mean log probabilities (base scores)
+  -> candidate-content hidden-state pooling
+  -> optional relational interaction
+  -> residual score correction
   -> RankingResult
 ```
 
@@ -460,10 +479,10 @@ Responsibilities remain deliberately small:
 | `contracts.py` | Public ranking data classes and reranker interface |
 | `config.py` | Inference/training configuration and JSON serialization |
 | `reranker.py` | InvariRank reranker and model lifecycle |
-| `framework.py` | Compatibility exports for the previous combined module |
 | `permutations.py` | Domain-neutral callable adapters and controlled input-order experiments |
 | `prompts.py` | Recommendation prompt and structural marker formatting |
 | `modeling.py` | Model loading, span extraction, attention, position IDs, and scoring |
+| `interactions.py` | Ranking-aware relational score correction for Setwise InvariRank |
 | `training.py` | LambdaRank, optional permutation consistency, LoRA, validation, and checkpoints |
 
 Candidate retrieval, paper reranking methods, generated-output prompts, paper metrics, and reproduction orchestration

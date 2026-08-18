@@ -256,7 +256,7 @@ string, and candidate records always include `item_id` plus any available metada
 
 ## Stage 5: Train Reranker
 
-This stage trains either an LFT (`causal`/`standard`) or InvariRank (`block`/`shared`) marker adapter from candidate JSON files with relevance labels.
+This stage trains an LFT (`causal`/`standard`), original pointwise InvariRank (`block`/`shared`), or Setwise InvariRank marker adapter from candidate JSON files with relevance labels. Setwise InvariRank uses a ranking-aware relational candidate interaction without introducing candidate-order dependence.
 Use the validation and training candidate artifacts exported from Stage 4.
 
 Complete option template:
@@ -279,6 +279,9 @@ python -m experiments.scripts.train_reranker `
   --gradient-accumulation-steps 16 `
   --train-num-permutations 1 `
   --eval-num-permutations 10 `
+  --lambda-rank 1.0 `
+  --lambda-perm 0.0 `
+  --permutation-loss kl `
   --max-history-items 20
 ```
 
@@ -286,7 +289,7 @@ Options:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `--method` | `invarirank` | `lft` or `invarirank`; the architecture is saved with the adapter. |
+| `--method` | `invarirank` | `lft`, `invarirank`, or `invarirank_setwise`; the architecture is saved with the artifact. |
 | `--train-candidates` | required | Candidate JSON for training. |
 | `--val-candidates` | required | Candidate JSON for validation. |
 | `--dataset` | `movielens` | Dataset config key. |
@@ -302,6 +305,13 @@ Options:
 | `--gradient-accumulation-steps` | `16` | Micro-batches per optimizer step. |
 | `--train-num-permutations` | `1` | Number of train permutations per sample. |
 | `--eval-num-permutations` | `10` | Number of validation permutations per sample. |
+| `--lambda-rank` | `1.0` | Weight applied to the mean LambdaRank loss. |
+| `--lambda-perm` | `0.0` | Weight applied to permutation consistency; values above zero require at least two training permutations. |
+| `--permutation-loss` | `kl` | Consistency divergence: `kl` or `jeffreys`. |
+| `--interaction-dim` | `256` | Candidate representation size for Setwise InvariRank. |
+| `--interaction-hidden-dim` | `512` | Hidden size in the setwise relational interaction network. |
+| `--interaction-dropout` | `0.1` | Dropout used by the setwise relational interaction network during training. |
+| `--interaction-score-scale` | `0.1` | Initial relational correction scale. |
 | `--max-history-items` | `20` | Max history items loaded per user. |
 
 Default training directory:
@@ -310,11 +320,31 @@ Default training directory:
 artifacts/rerankers/{dataset}/{method}/invarirank_marker/
 ```
 
-The final adapter is saved under:
+The final complete reranker artifact is saved under:
 
 ```text
 artifacts/rerankers/{dataset}/{method}/invarirank_marker/checkpoints/final/
 ```
+
+Training also maintains one recoverable epoch checkpoint:
+
+```text
+artifacts/rerankers/{dataset}/{method}/invarirank_marker/checkpoints/latest/
+```
+
+`latest` is atomically replaced after every fully completed epoch. Re-running the same training command with the same
+output directory automatically restores its model or adapter, interaction weights, optimizer, gradient-accumulation
+state, global and micro steps, mixed-precision scaler, and random-number-generator states, then continues at the next
+epoch. Training settings that affect optimization must match the saved run, although the total optimizer-step target
+may be increased. A successfully written `final` checkpoint removes `latest`, leaving only the final artifact. If
+`final` already exists, the training command refuses to overwrite it; choose a new output directory for another run.
+
+An interruption partway through an epoch resumes from the end of the preceding completed epoch. Work performed after
+that boundary is intentionally repeated.
+
+Interaction-aware checkpoints also contain `interaction_model.safetensors`. Run them by passing the final checkpoint
+directory as the adapter/model artifact; the saved architecture is detected automatically, and missing or incompatible
+interaction weights are rejected rather than randomly initialized.
 
 ## Stage 6: Run Reranker
 
