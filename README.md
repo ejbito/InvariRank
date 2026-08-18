@@ -20,13 +20,13 @@ the `experiments` workflow used for paper-style two-stage recommendation experim
 ## 📄 Papers
 
 > **One Pass, Any Order: Position-Invariant Listwise Reranking for LLM-Based Recommendation**  
-> Ethan Bito, Yongli Ren, and Estrid He.
+> Ethan Bito, Yongli Ren, and Estrid He.<br>
 > *Proceedings of the 49th International ACM SIGIR Conference on Research and Development in Information Retrieval
 > (SIGIR '26).*  
 > [ACM](https://dl.acm.org/doi/abs/10.1145/3805712.3809952) | [arXiv](https://arxiv.org/abs/2604.27599)
 
 > **Position Bias Undermines Preference Consistency in Listwise LLM-Based Reranking**  
-> Ethan Bito, Yongli Ren, and Estrid He.
+> Ethan Bito, Yongli Ren, and Estrid He.<br>
 > *Proceedings of the 20th ACM Conference on Recommender Systems (RecSys '26).*  
 > [arXiv](https://arxiv.org/abs/2608.03091)
 
